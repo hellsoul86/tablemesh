@@ -1,4 +1,4 @@
-# Manual local connection template. Replace the launcher placeholder yourself.
+# Tokem local connection. Replace the launcher placeholder with your checkout path.
 # Keep credentials in the invoking process environment, not this file.
 [mcp_servers.tablemesh]
 command = "node"

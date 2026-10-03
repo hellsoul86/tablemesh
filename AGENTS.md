@@ -1,50 +1,40 @@
-# TableMesh
+# Tokem
 
-Multi-account tabletop rooms for web clients and Codex tools. v0 implements local
-Texas Hold'em with an independent sandbox rewards site.
+Local multi-account Texas Hold'em for web clients and Codex tools, with a separate
+sandbox rewards site.
 
-## Repository
+## Repository and commands
 
-- `repository identity`: github.com/hellsoul86/tablemesh
-- `integration remote`: origin
-- `integration branch`: main (greenfield: absent until the reviewed first push)
-- `task worktrees`: isolated codex/* branches; never commit from main
-- `deployment model`: non-publishing (local v0; repository publication only)
-- No deployment, release tag, production reward activation, or public plugin
-  directory submission is part of the initial implementation.
+- Repository: `github.com/hellsoul86/tablemesh`; integration: `origin/main`.
+- Use isolated `codex/*` task branches and preserve unrelated changes.
+- `npm ci` installs the lockfile. Node >=22.13 is required; CI uses Node 22/24.
+- `npm run check`: typecheck, core/server tests, and all package builds.
+- `npm run test --workspace @tablemesh/core` or `@tablemesh/server`: scoped tests.
+- `npm run dev`: loopback API :4100, player web :5173, rewards web :5174.
+- `npm run plugin:check`: starts the declared stdio launcher with an SDK client.
+- `npm run test:e2e`: Chromium browser checks; install Chromium as in README.
 
-## Commands
+## Project boundaries
 
-- `install`: npm ci (lockfile); worker installation used npm install.
-- `check`: npm run check (typecheck, core/server tests, all builds).
-- `test`: npm test; scoped server: npm run test --workspace @tablemesh/server.
-- `build`: npm run build.
-- `dev`: npm run dev (API 4100; player 5173; rewards 5174, loopback).
-- `plugin check`: npm run plugin:check (actual stdio launcher/SDK).
-- `browser acceptance`: npm run test:e2e.
-- Runtime target: Node >=22.13; CI exercises Node 22 and 24. Command existence is
-  verified; final aggregate results are reported separately from scoped results.
-
-## Boundaries
-
-- Product scope: docs/PRODUCT.md; canonical UI contract: docs/DESIGN.md.
-- Architecture, HTTP/MCP protocol, security, and frozen DTO/engine contracts:
-  docs/ARCHITECTURE.md, docs/PROTOCOL.md, docs/SECURITY.md,
-  docs/ENGINE-CONTRACT.ts. Record incompatible changes before implementation.
-- packages/core is pure and browser-safe. It must not import server, database,
-  network, random, or wall-clock facilities.
-- Only the server owns authentication, authoritative rooms, deadlines, persistence,
-  the points ledger, encrypted inventory, and redemption authorization.
-- Never serialize full engine state externally. Each viewer receives only public
-  state, their own private cards, and their own legal actions.
-- Practice chips, platform points, and external model spending stay separate.
-  v0 has no win-based point grant, paid buy-in, or real card fulfillment.
-- MCP tokens permit game operations only. Reward secrets and admin credentials
-  must never enter plugin outputs or frontend bundles.
-- Keep credentials, real card codes, sessions, databases, and local evidence out
-  of public commits. Use example values in configuration templates.
-- Close roadmap issues only with exact checks and runtime evidence. Local tests,
-  CI, host installation, deployment, and directory approval are distinct claims.
-- Active-hand participants stay locked. Explicit confirmAbandon applies persisted
-  reputation/cooldown once per account/room/hand; disconnect never confirms it.
-  All-in settlement rights remain, and no platform points are penalized.
+- Product and UI: `docs/PRODUCT.md`, `docs/DESIGN.md`. Technical contracts:
+  `docs/ARCHITECTURE.md`, `docs/PROTOCOL.md`, `docs/SECURITY.md`,
+  `docs/ENGINE-CONTRACT.ts`. Keep the documented DTOs and source types in sync.
+- `packages/core` is pure and browser-safe: no server, database, network, random,
+  or wall-clock imports. Deck and time are passed into the reducer.
+- The server owns sessions, room state, deadlines, persistence, points, inventory
+  and redemption permissions. Serialize public state plus the viewer's own cards
+  and legal actions; keep the full engine record inside the service.
+- Practice chips, platform points and external model spending are separate.
+  v0 has no win-based point grants, paid buy-in or real card fulfillment.
+- Game MCP tokens cannot read reward secrets or use admin endpoints. Keep keys,
+  tokens and card codes out of plugin output, frontend bundles and public commits;
+  exclude local databases and evidence as well.
+- Active-hand accounts and seats stay fixed until settlement. Explicit
+  `confirmAbandon` applies persisted reputation/cooldown once per account/room/hand.
+  Disconnect does not confirm abandonment. All-in payout rights remain; platform
+  points are not penalized.
+- Keep the compatibility identifiers `@tablemesh/*`, `TABLEMESH_*`, MCP tool and
+  plugin IDs, API paths and repository URLs when editing Tokem branding.
+- Local tests, CI, SDK checks, host installation, deployment and public directory
+  approval are separate evidence. Describe the result actually verified. Live
+  deployment, real rewards and public plugin submission are outside local v0.

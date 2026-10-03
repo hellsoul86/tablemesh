@@ -1,7 +1,6 @@
-/** TableMesh v0 frozen integration contract. Copy browser-safe DTOs into
- * packages/core/src/contracts.ts; core functions into packages/core/src/index.ts.
- * All amounts are safe nonnegative integer units. All times are Unix milliseconds.
- * The server validates runtime data. Account identity never comes from a command.
+/** Tokem v0 DTO and engine contract; mirrored in docs/ENGINE-CONTRACT.ts.
+ * Amounts use nonnegative safe integers; times use Unix milliseconds.
+ * The server validates requests and resolves account identity from the session.
  */
 export type AccountId = string;
 export type RoomId = string;
@@ -74,7 +73,7 @@ export interface RedemptionView { id: string; productId: string; pointsCost: num
  status: 'fulfilled' | 'failed' | 'pending'; sandbox: boolean; createdAt: number }
 export interface RedemptionSecret extends RedemptionView { code: string }
 
-/** Core-only state MUST NOT be exported by any HTTP/MCP serializer. */
+/** Internal engine state. HTTP/MCP serializers use viewer projections. */
 export interface HoldemEngineState {
  config: HoldemConfig; publicState: HoldemPublicState;
  // explicit serializable engine-private record supports snapshot/restart.
@@ -87,7 +86,7 @@ export type EngineResult = { ok: true; transition: EngineTransition }
  | { ok: false; error: { code: 'ILLEGAL_ACTION' | 'INVALID_INPUT'; message: string } };
 export interface StartHandInput { handId: HandId; deck: Card[]; now: number }
 export interface ApplyActionInput { seat: SeatIndex; action: HoldemAction; windowId: string; now: number }
-/** Implement and export these exact functions; no IO/random/current time inside core. */
+/** Pure engine functions: callers supply the deck and time; core performs no IO. */
 export interface HoldemEngine {
  createTable(config: HoldemConfig, seats: SeatIdentity[]): HoldemEngineState;
  setSeats(state: HoldemEngineState, seats: SeatIdentity[]): EngineResult;
@@ -98,7 +97,7 @@ export interface HoldemEngine {
  getPrivateState(state: HoldemEngineState, seat: SeatIndex): HoldemPrivateState;
  getLegalActions(state: HoldemEngineState, seat: SeatIndex): LegalAction[];
 }
-/** Later rules implement this same privacy/transition shape without forcing poker fields. */
+/** Extension shape for future games with separate public/private views. */
 export interface RuleSet<State, Public, Private, Action, Config> {
  id: GameId; version: string;
  create(config: Config, seats: SeatIdentity[]): State;

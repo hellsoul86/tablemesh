@@ -2,9 +2,23 @@
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "tablemesh",
   "version": "0.1.0",
-  "description": "Join shared tabletop rooms, inspect your own legal actions, and play free practice Hold’em.",
-  "author": { "name": "hellsoul86" },
+  "description": "Tokem：查看账户和积分，加入练习牌桌，用当前合法动作打德州。",
+  "author": {
+    "name": "hellsoul86"
+  },
   "repository": "https://github.com/hellsoul86/tablemesh",
   "license": "MIT",
-  "keywords": ["tabletop", "holdem", "multiplayer"]
+  "keywords": [
+    "tabletop",
+    "holdem",
+    "multiplayer"
+  ],
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Tokem",
+        "shortDescription": "账户、练习牌桌和德州动作。"
+      }
+    }
+  }
 }

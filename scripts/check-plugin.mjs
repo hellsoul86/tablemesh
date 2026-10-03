@@ -85,7 +85,7 @@ try {
   assert.equal(points.data.account.points, 1000);
   assert.equal(JSON.stringify(points).includes('code_ciphertext'), false);
   assert.equal(stderr.includes(minted.body.data.token), false);
-  console.log(`Plugin manifests + actual launcher spawn + SDK tools: PASS (10 tools, ${toolMoves} authenticated game actions, explicit abandonment guard; no host-install claim).`);
+  console.log(`Tokem plugin check: PASS (launcher spawned, 10 tools, ${toolMoves} game actions, explicit abandonment guard; host installation unverified).`);
 } finally {
   await client?.close();
   await f.close();

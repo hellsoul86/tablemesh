@@ -1,7 +1,11 @@
 {
   "name": "tablemesh",
   "version": "0.1.0",
-  "description": "Shared free practice Hold’em rooms for authenticated accounts.",
+  "description": "Tokem：登录账户，加入牌桌，打免费练习德州。",
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json"
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Tokem",
+    "shortDescription": "账户、练习牌桌和德州动作。"
+  }
 }
