@@ -1,0 +1,72 @@
+# TableMesh implementation architecture
+
+## Outcome and boundaries
+
+v0 is a locally runnable multi-account Texas Hold'em service, web table and independent rewards site, plus a locally testable Codex plugin. People and agents use the same account, permissions, rooms, actions and deadlines. Account identity is real registration/login, not a synthetic player chosen by an MCP tool. No model inference or OpenAI API key is required: the user's existing Codex chooses when to call tools.
+
+Joining seats is immediately ready in v0; owner starts with >=2 funded occupied seats. No separate ready state/button is implemented. Fixed free practice chips belong to a table; platform points belong to the account ledger. Chips cannot buy points, purchase cards or be redeemed. Demo platform points and sandbox card inventory prove ledger/redemption behavior; real rewards default off. Splitting the reward website is a product and secret-access boundary, never an assertion that the combined product avoids platform policy or review. Public plugin submission, live hosting and real redeemable reward economics remain separate follow-up decisions.
+
+## Runtime and packages
+
+Use npm workspaces, ESM, strict TypeScript, Node >=22.13. Pin dependency versions and package-lock. CI tests Node22 and Node24. The local host currently has Node26.7, which is not evidence for the minimum runtime. Node:sqlite at 22.13 needs no experimental flag but was still active development; restrict code to its baseline APIs and explicitly accept this v0 dependency. DatabaseSync blocks the event loop, so keep transactions short; no remote calls or await inside a transaction. Bind the development server to loopback by default. No native npm database addon is necessary.
+
+| Package | Responsibility | Allowed dependencies |
+|---|---|---|
+| packages/core | serializable pure Hold'em state/reducer/evaluator; browser-safe shared DTOs; extension contract | TypeScript only; no server/network/SQLite imports |
+| packages/server | auth/session/scope; HTTP ApplicationService; room scheduler and persistence; points; inventory/redemption; stdio MCP adapter | core, node builtins, pinned MCP SDK+zod |
+| packages/web | sign-in, lobby, account/points, table; own legal moves; reconnect | core types, Vite; vanilla TS is adequate |
+| packages/rewards-web | sign-in, catalog, redeem/order secret, protected inventory UI | core types, Vite; never import server secrets |
+| plugins/tablemesh | portable/compat manifest, local stdio MCP config, gameplay SKILL.md, README | launcher points at built server adapter |
+
+Recommend TypeScript5.9.3, tsx4.23.15, @modelcontextprotocol/sdk1.32.0 and zod4.6.5. Registry latest TypeScript is7.0.2; choosing5.9 is a scoped compatibility choice, not a latest-version claim. Vite8.3.2 requires Node ^20.19.0||>=22.12.0; Node22.13 satisfies it. MCP SDK1.32 needs Node>=18 and supports zod ^3.25||^4.0. Use official v1 SDK docs for1.32; repository main now describes v2. Node's builtin test runner plus compiled JS is sufficient; avoid introducing Vitest if unneeded. If used, current Vitest5.0.3 supports ^22.12||^24||>=26.
+
+## Persistence and transactions
+
+One Node server process owns each SQLite file. A stdio plugin process connects over authenticated HTTP to it; it must never start a competing room engine or manipulate SQLite directly. Database config: `PRAGMA foreign_keys=ON; journal_mode=WAL; synchronous=FULL; busy_timeout=5000`. On22.13 `timeout` is not a DatabaseSync constructor option; the PRAGMA works. All application writes use prepared statements and `BEGIN IMMEDIATE`. WAL is not a multiwriter mechanism; SQLite permits one write transaction. Room queues control ordering within this process, while transaction version CAS protects against unexpected duplicate writers. A future multi-instance service needs assigned room ownership plus durable fencing and likely a different database; no such scaling claim is made here.
+
+Minimal tables:
+
+- accounts(id, normalized_name UNIQUE, display_name, password_hash, created_at); sessions(token_hash UNIQUE, account_id, scope, expires_at, revoked_at). Web sessions and game bearer tokens have separate kinds/scope; roles are server data.
+- rooms(id, owner_account_id, name, config_json, engine_json, state_version, event_cursor, updated_at); room_events(room_id,cursor,type,public_payload_json, UNIQUE(room_id,cursor)). Never persist private engine events in the public event stream. The complete engine snapshot persists deck/private cards solely for crash recovery, with protected database access.
+- requests(account_id,operation,resource_id,request_id,body_hash,result_metadata, UNIQUE(...)); exact duplicates replay, payload mutation conflicts. Store acceptance metadata rather than secret-heavy copies.
+- wallets(account_id UNIQUE, available_points CHECK>=0, held_points CHECK>=0); ledger(id,account_id,delta,held_delta,reason,source_key UNIQUE,created_at). Wallet and ledger change in one transaction. A trigger or application invariant checks deltas against final wallet. No arbitrary points-update tool exists.
+- products(id,name,points_cost CHECK>0,sandbox,enabled); inventory(id,product_id,code_ciphertext,code_fingerprint UNIQUE,status,redemption_id UNIQUE); redemptions(id,account_id,product_id,cost,status,sandbox,request_id, UNIQUE(account_id,request_id)); admin_audit actor/action/target without codes.
+- reward_claims(account_id,day,policy_version,hand_id,points, UNIQUE(account_id,hand_id,policy_version)); daily cap updates transactionally. Demo starter grant source_key=`starter:<account>:<policy>` is unique and clearly labeled sandbox.
+
+Room mutation atomic sequence: dedup -> authoritative version+seat/window guards -> pure reducer -> append public events and private engine snapshot -> advance room version once per accepted command -> apply unique platform settlement grant if enabled -> record acceptance -> commit. Responses emitted after commit. Persist deadline; restart schedules past-due windows immediately. Timeouts share the room queue. GET snapshot derives authenticated viewer's own private cards and legal actions. No full engine_state JSON leaves the server.
+
+Redemption with preimported local inventory is one short atomic transaction: find same-request replay -> validate product/rewards mode -> conditionally reserve exactly one available inventory row -> debit available to held (reserve ledger) -> assign encrypted code to redemption -> reduce held balance (capture ledger) -> fulfill -> commit. If any step fails, rollback all rows. Even though hold+capture occur atomically for local inventory, retain the entries to model future fulfillment. A future external supplier uses pending state and idempotent fulfillment/outbox, plus release ledger on definitive failure. Do not make network calls while holding SQLite locks. Repeated same request returns the same redemption; two accounts competing for the last code yield exactly one success and one OUT_OF_STOCK. Never debit on the losing request.
+
+## Hold'em rules and invariants
+
+Core accepts an injected unique52-card shuffled deck and absolute time. Server performs unbiased Fisher-Yates using crypto.randomInt. Core contains no random generator, clocks, network, accounts ledger or rewards. Engine functions and shared fields are frozen in ENGINE-CONTRACT.ts. Reducers do not mutate their input; valid output is JSON serializable.
+
+- 2..6 seated players, safe integer chips, fixed initial stack; blinds positive and SB<=BB. Heads-up button posts SB, acts first preflop and last postflop; multiway action starts left ofBB preflop, left ofbutton postflop. Rotate button among funded occupied seats for later hands. Deal two hole cards; burn before each flop/turn/river if included in the fixed deck traversal.
+- `raise.amount` means final street contribution. `toCall=max(0,currentBet-streetBet)`; call deducts min(toCall,stack). Full minimum raise is currentBet+lastFullRaiseIncrement. Initial full increment isBB, including when a short blind is all-in. Full raise resets pending responders and reopens raise rights. Below-minimum raise legal only for exact all-in street total. Player cannot raise when no non-all-in opponent can contest further chips.
+- A short all-in changes currentBet and forces owed calls but does not alone reopen a previously acting player's raise. Track each player's last acted bet/required full increment; multiple short all-ins cumulatively reaching a full raise faced by that player reopen rights. An `actedSeats` boolean alone is insufficient. An initial short opening bet and a full completion require explicit tests.
+- Street completes only after all nonfolded, non-all-in players have responded to the latest owed bet and contributions match currentBet. With all remaining players all-in, run out the board without requiring nonexistent actions. One nonfolded player wins immediately without revealing that player's hole cards.
+- Build side pots from sorted unique contribution thresholds. Each tranche includes folded contributions but eligibility contains only nonfolded contributors reaching that threshold. Return any unmatched single-player top contribution as an uncalled refund. Each contested pot gets independent winner evaluation; distribute integer split shares, then odd chips clockwise starting left of the button among that pot's tied winners. Suits never break ties.
+- Evaluate best five of seven using a comparable rank/category vector; wheel A2345 supported; no floating point. Validate all52 distinct cards; private/revealed cards never duplicate board/deck positions. At showdown reveal only eligible nonfolded contenders needed for deterministic payout. Folded cards remain private.
+- Before and after every accepted transition sum(stacks)+sum(unsettled contributions) remains equal to chips entering the hand; stacks/contributions never negative; settlement awards+refunds equal all contributions. Completed payouts apply once, after which contribution fields must clear or be excluded from the live conservation equation. startHand never awards the previous settlement again.
+
+## Rule expansion
+
+v0 implements only Hold'em. GameId is extensible; unavailable rules return explicit unsupported input. Core RuleSet abstraction has explicit publicView/privateView, seats with optional teamId, serial reducer, windows with kind turn/response and eligibleSeats+deadline+single/parallel mode. Tractor team membership is data; Mahjong claim/discard responses share an immutable response-window baseline and collect separate seat intents, then resolve priority once. Parallel response does not mean concurrent mutable reducers. Do not implement empty placeholder games advertised as working. Later game-specific views/actions become discriminated unions instead of widening Hold'em with irrelevant fields.
+
+## Acceptance and commands
+
+Recommended root scripts: `npm ci`, `npm run typecheck`, `npm test`, `npm run build`; per package `npm run test --workspace @tablemesh/core`, `npm run test --workspace @tablemesh/server`; local `npm run dev --workspace @tablemesh/server`, `npm run dev --workspace @tablemesh/web`, `npm run dev --workspace @tablemesh/rewards-web`; built stdio `node packages/server/dist/mcp.js`. Exact names should be provided by the scaffold. Root runs final typecheck/test/build once on the assembled source after worker checks.
+
+v0 acceptance: real2-account login/join and hand through HTTP and real SDK MCP client; outsider read sees no hole cards; accountA cannot act forB; duplicate/stale/changed request behavior; turn deadline check/fold and restart recovery; full Hold'em scenarios and payout properties; unique demo grants; atomic concurrent last-stock redemption; code visible only to owner rewards session; distinct web UI real backend connection and refresh restoration; usable plugin package and documented local install. An SDK client session proves MCP protocol, but a Codex host installation test is a separate artifact and must be reported honestly if unavailable.
+
+Future scope: public directory policy and HTTPS MCP deployment; real reward economic/legal/policy decisions; OAuth for public clients; commercial supplier fulfillment; Tractor and Mahjong engines; multi-instance room ownership; streaming notifications. None is silently included in local v0 completion.
+
+## Primary sources checked 2026-10-03
+
+- Node SQLite current history/API: https://nodejs.org/api/sqlite.html ; minimum-version source https://github.com/nodejs/node/blob/v22.13.0/doc/api/sqlite.md . Current docs contain APIs not available in22.13.
+- SQLite transaction semantics: https://sqlite.org/lang_transaction.html ; https://sqlite.org/wal.html . The transaction design above is TableMesh's own use of those primitives.
+- npm metadata commands executed: `npm view @modelcontextprotocol/sdk version engines peerDependencies --json`, `npm view vite version engines --json`, `npm view typescript@5.9 version --json`, `npm view tsx version engines --json`, `npm view zod version --json`, `npm view vitest version engines --json`. Registry endpoints: https://registry.npmjs.org/@modelcontextprotocol%2fsdk ; https://registry.npmjs.org/vite ; https://registry.npmjs.org/typescript ; https://registry.npmjs.org/tsx ; https://registry.npmjs.org/zod . Package versions are time-stamped research snapshots, not perpetual latest assumptions.
+- Vite supported Node: https://vite.dev/guide/ . MCP v1 docs https://ts.sdk.modelcontextprotocol.io/ ; official source https://github.com/modelcontextprotocol/typescript-sdk . Main now points to v2; use v1 docs for selected1.32.
+- Plugin package and MCP docs: https://developers.openai.com/plugins/build/plugins ; https://developers.openai.com/plugins/build/mcp-server . Portable plugin.json+mcp.json is preferred; Codex compatibility .codex-plugin/plugin.json remains supported. Public submission generally requires remote HTTPS; a local test package is not proof of directory approval.
+- MCP security: https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices . Transport/session identifiers are not application authorization; scopes and ownership are validated by server.
+- Poker rule organization reference: https://www.pokertda.com/poker-tda-rules/ . TableMesh specifies its digital house rules above rather than copying TDA wording or claiming full tournament conformance; formal licensed tournament ruleset is future scope.
