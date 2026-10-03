@@ -50,10 +50,10 @@ export class Application {
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.requestTimeout = 15_000;
     this.server.headersTimeout = 10_000;
-    this.timer = this.config.schedulerIntervalMs > 0 ? setInterval(() => { void this.runTimeouts().catch(() => console.error('TableMesh timeout processing failed')); }, this.config.schedulerIntervalMs) : null;
+    this.timer = this.config.schedulerIntervalMs > 0 ? setInterval(() => { void this.runTimeouts().catch(() => console.error('Tokem timeout processing failed')); }, this.config.schedulerIntervalMs) : null;
     this.timer?.unref();
     // Startup immediately restores overdue persisted windows through the same queue.
-    void this.runTimeouts().catch(() => console.error('TableMesh startup recovery failed'));
+    void this.runTimeouts().catch(() => console.error('Tokem startup recovery failed'));
   }
   async listen(port = this.config.port): Promise<string> {
     await new Promise<void>((resolve, reject) => { this.server.once('error', reject); this.server.listen(port, this.config.host, () => { this.server.off('error', reject); resolve(); }); });
@@ -491,7 +491,7 @@ export class Application {
       res.end(JSON.stringify({ ok: true, data } satisfies ApiResult<unknown>));
     } catch (error) {
       const failure = error instanceof AppError ? error : new AppError('INTERNAL', 'Server could not complete this request', 500);
-      if (!(error instanceof AppError)) console.error('TableMesh request failed');
+      if (!(error instanceof AppError)) console.error('Tokem request failed');
       res.statusCode = failure.status;
       res.end(JSON.stringify({ ok: false, error: { code: failure.code, message: failure.message, ...(failure.currentStateVersion === undefined ? {} : { currentStateVersion: failure.currentStateVersion }) } }));
     }

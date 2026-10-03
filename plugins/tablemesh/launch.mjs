@@ -10,7 +10,7 @@ const root = process.env.TABLEMESH_REPO_ROOT
 const manifest = join(root, 'package.json');
 const entry = join(root, 'packages/server/dist/mcp.js');
 if (!existsSync(manifest) || JSON.parse(readFileSync(manifest, 'utf8')).name !== 'tablemesh' || !existsSync(entry)) {
-  console.error('TableMesh runtime is not built. Set TABLEMESH_REPO_ROOT to the checkout and run npm ci && npm run build there.');
+  console.error('Tokem runtime is not built. Set TABLEMESH_REPO_ROOT to the checkout and run npm ci && npm run build there.');
   process.exit(1);
 }
 await import(pathToFileURL(entry).href);

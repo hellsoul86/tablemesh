@@ -14,7 +14,7 @@ try {
     '-c', 'mcp_servers.tablemesh.command="node"',
     '-c', `mcp_servers.tablemesh.args=${JSON.stringify([launcher])}`,
     '-c', 'mcp_servers.tablemesh.env_vars=["TABLEMESH_TOKEN","TABLEMESH_URL","TABLEMESH_REPO_ROOT"]',
-    'This is a read-only TableMesh MCP connectivity check. Call tablemesh_account and tablemesh_lobby through MCP exactly once each. Do not use shell, inspect files, use other tools, play, or mutate any resource. Never output credentials. Report only whether both calls succeeded and the room count.'
+    'Check the Tokem MCP connection. Call tablemesh_account and tablemesh_lobby once each. Do not use shell, read files, call other tools, play, or change data. Do not output credentials. Report whether both calls succeeded and the room count.'
   ], { cwd: root, env: { ...process.env, TABLEMESH_TOKEN: minted.body.data.token, TABLEMESH_URL: f.url, TABLEMESH_REPO_ROOT: root }, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = ''; let stderr = ''; let timedOut = false;
   child.stdout.on('data', chunk => { stdout += chunk; });
@@ -28,6 +28,6 @@ try {
   const passed = exitCode === 0 && unique.includes('tablemesh_account') && unique.includes('tablemesh_lobby');
   const failureEvents = events.filter(event => ['error', 'turn.failed'].includes(event.type)).map(event => event.message ?? event.error?.message ?? event.error ?? event.type);
   const startupErrors = stderr.split('\n').filter(line => /error|fail|unauthor|401|timeout|not found/i.test(line)).slice(-5).map(line => line.replaceAll(minted.body.data.token, '[redacted]').replace(/(?:sk-|gh[pousr]_)[A-Za-z0-9_-]+/g, '[redacted]').slice(0, 400));
-  console.log(JSON.stringify({ host: 'Codex CLI ephemeral explicit MCP configuration', passed, exitCode, timedOut, completedTools: unique, ...(passed ? {} : { limitation: timedOut ? 'No tool completion within 60 seconds' : 'No completed TableMesh calls', failureEvents, startupErrors }), manifestInstallationVerified: false }));
+  console.log(JSON.stringify({ host: 'Codex CLI ephemeral explicit MCP configuration', passed, exitCode, timedOut, completedTools: unique, ...(passed ? {} : { limitation: timedOut ? 'No tool completion within 60 seconds' : 'No completed Tokem calls', failureEvents, startupErrors }), manifestInstallationVerified: false }));
   if (!passed) process.exitCode = 1;
 } finally { await f.close(); }

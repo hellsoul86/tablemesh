@@ -6,7 +6,7 @@ import type {RoomSnapshot} from '../../packages/core/src/contracts';
 const evidence=process.env.TABLEMESH_EVIDENCE_DIR||join(fileURLToPath(new URL('../../',import.meta.url)),'test-results','evidence');
 test.beforeAll(async()=>{await mkdir(evidence,{recursive:true});});
 async function snapshot(page:Page,roomId:string):Promise<RoomSnapshot>{const result=await page.request.get(`/api/rooms/${encodeURIComponent(roomId)}`);expect(result.ok()).toBeTruthy();return (await result.json()).data;}
-async function register(page:Page,name:string){await page.goto('/app/lobby');await page.getByLabel('昵称',{exact:true}).fill(name);await page.getByLabel('密码',{exact:true}).fill('TableMesh-test-pass-2026');await page.getByRole('button',{name:'注册账户',exact:true}).click();await expect(page.getByRole('heading',{name:'找张牌桌，坐下来。'})).toBeVisible();}
+async function register(page:Page,name:string){await page.goto('/app/lobby');await page.getByLabel('昵称',{exact:true}).fill(name);await page.getByLabel('密码',{exact:true}).fill('TableMesh-test-pass-2026');await page.getByRole('button',{name:'注册账户',exact:true}).click();await expect(page.getByRole('heading',{name:'牌桌大厅'})).toBeVisible();}
 async function noOverflow(page:Page){expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);}
 async function choosePassive(page:Page,roomId:string){const state=await snapshot(page,roomId);await expect.poll(()=>page.evaluate(()=>JSON.parse((window as any).render_game_to_text()).room.stateVersion)).toBe(state.stateVersion);const legal=state.you.legalActions;const chosen=legal.find(a=>a.type==='check')??legal.find(a=>a.type==='call')??legal.find(a=>a.type==='fold');expect(chosen,'a passive legal action is available').toBeTruthy();const button=page.locator(`[data-action="${chosen!.type}"]`);await expect(button).toBeVisible();await button.click();return state.stateVersion;}
 async function joined(page:Page){const take=page.getByRole('button',{name:'入座，即准备',exact:true});const leave=page.getByRole('button',{name:'离开席位',exact:true});await expect(take.or(leave)).toBeVisible();if(await take.isVisible())await take.click();await expect(leave).toBeVisible();}
@@ -29,7 +29,7 @@ test('真实双账户牌局、移动布局、重连、积分兑换与授权隔�
  // Lose an accepted response. The explicit retry must send the same requestId and body.
  const requests:string[]=[];let loseOnce=true;
  await actor.route(`**/api/rooms/${roomId}/actions`,async route=>{requests.push(route.request().postData()!);if(loseOnce){loseOnce=false;await route.fetch();await route.abort('failed');}else await route.continue();});
- await actor.getByRole('button',{name:'确认加注',exact:true}).click();await expect(actor.getByRole('button',{name:'确认原请求',exact:true})).toBeVisible();await actor.getByRole('button',{name:'确认原请求',exact:true}).click();await expect(actor.getByRole('button',{name:'确认原请求',exact:true})).toHaveCount(0);expect(requests).toHaveLength(2);expect(requests[0]).toBe(requests[1]);await actor.unroute(`**/api/rooms/${roomId}/actions`);
+ await actor.getByRole('button',{name:'确认加注',exact:true}).click();await expect(actor.getByRole('button',{name:'重试上次操作',exact:true})).toBeVisible();await actor.getByRole('button',{name:'重试上次操作',exact:true}).click();await expect(actor.getByRole('button',{name:'重试上次操作',exact:true})).toHaveCount(0);expect(requests).toHaveLength(2);expect(requests[0]).toBe(requests[1]);await actor.unroute(`**/api/rooms/${roomId}/actions`);
  let photographed=false;
  for(let steps=0;steps<25;steps++){
   const x=await snapshot(a,roomId);if(x.game.phase==='complete')break;
