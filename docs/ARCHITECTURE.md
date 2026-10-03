@@ -2,7 +2,7 @@
 
 ## v0
 
-Tokem runs a multi-account Texas Hold'em service, a player web app, a separate rewards web app and a local Codex plugin. People and agents use the same accounts, seat permissions, actions and deadlines. Registration and login create the identity; the plugin uses an issued game token. It makes no model calls and requires no OpenAI API key.
+Tokem runs a multi-account Texas Hold'em service, a player web app, a separate rewards web app and MCP tools for user-operated Agents. People and agents use the same accounts, seat permissions, actions and deadlines. Registration and login create the identity; the plugin uses an issued game token. It makes no model calls and requires no OpenAI API key.
 
 Joining a seat makes it ready. The owner can start with at least two funded seats. Practice chips belong to the table; platform points belong to the account ledger. Chips cannot buy points or be redeemed. v0 uses demo starter points and sandbox inventory, with real rewards disabled by default. A separate rewards website limits access to card secrets; it does not exempt the product from platform review. Public plugin submission, hosting and real reward economics are follow-up work.
 
@@ -13,7 +13,7 @@ The repository uses npm workspaces, ESM, strict TypeScript and Node >=22.13. Dep
 | Package | Responsibility | Runtime dependencies |
 |---|---|---|
 | packages/core | Serializable Hold'em reducer/evaluator and browser-safe DTOs | None |
-| packages/server | Sessions, HTTP, room scheduler, SQLite, points, inventory, redemption and stdio MCP adapter | core, Node builtins, MCP SDK, zod |
+| packages/server | Sessions, HTTP, room scheduler, SQLite, points, inventory, redemption and HTTP/stdio MCP adapters | core, Node builtins, MCP SDK, zod |
 | packages/web | Login, lobby, account/points, table and reconnect | Browser API client; Vite build |
 | packages/rewards-web | Catalog, redemption, owner code reveal and protected inventory UI | Browser API client; Vite build |
 | plugins/tablemesh | Manifests, launcher and gameplay skill | Built server adapter |
@@ -24,7 +24,7 @@ Tokem is the display name. Package names `@tablemesh/*`, environment variables `
 
 ## Persistence and transactions
 
-One Node server process owns each SQLite file. The stdio adapter connects over authenticated HTTP to that process. It does not open the database or run a second engine. Startup sets `foreign_keys=ON`, `journal_mode=WAL`, `synchronous=FULL` and `busy_timeout=5000`. The timeout PRAGMA works on Node 22.13; the later `DatabaseSync` constructor timeout option is not used. Prepared statements and `BEGIN IMMEDIATE` handle writes. SQLite allows one writer; WAL does not remove that limit. Multi-instance room ownership and fencing are not implemented.
+One Node server process owns each SQLite file. Both the stdio adapter and stateless HTTP MCP registry invoke the same authenticated game API on that process. It does not open the database or run a second engine. Startup sets `foreign_keys=ON`, `journal_mode=WAL`, `synchronous=FULL` and `busy_timeout=5000`. The timeout PRAGMA works on Node 22.13; the later `DatabaseSync` constructor timeout option is not used. Prepared statements and `BEGIN IMMEDIATE` handle writes. SQLite allows one writer; WAL does not remove that limit. Multi-instance room ownership and fencing are not implemented.
 
 The current schema contains:
 
@@ -41,6 +41,12 @@ Room commands run in a per-room queue. Accepted duplicates replay first. For a n
 The service saves each new transition settlement before abandoned participants are removed. Seat changes clear stale current-hand display fields, while the persisted event retains the original account identities and awards. GET snapshots project the requesting viewer's cards and legal actions; the full engine JSON stays inside the service.
 
 Redemption checks retry history, product mode, balance and available inventory in one transaction. It assigns one code, records a points reserve and capture, and marks the order fulfilled. Failure rolls back the transaction. A retry returns the same order; two accounts competing for the last code yield one fulfillment and one OUT_OF_STOCK, without debiting the loser. Future external fulfillment will need pending holds, an outbox, idempotent delivery and release on definitive failure before supplier calls are added.
+
+## User Agent connection
+
+The user runs the Agent and its model. Tokem provides an authenticated `/mcp` Streamable HTTP endpoint, with local stdio as an alternative; no model provider configuration or server-side decision loop is involved. `mcp-tools.ts` owns one registry for both transports. The HTTP adapter creates a server/transport per POST and uses a fixed self-HTTP target to reuse the game dispatcher; it does not duplicate reducers or ledger operations. Current game tokens resolve one account, so manual and Agent clients share its seat. Competing actions are serialized and stale versions rejected.
+
+The eleventh tool, `tablemesh_wait_for_turn`, returns a fresh viewer snapshot on the viewer's turn, hand completion, state change or a bounded timeout. At most two waits per account and 100 process-wide wait outside room queues/transactions, for at most 25 seconds. Cancellation and stopping an Agent do not leave the table; normal deadline check/fold continues. Connection metadata gives the web UI a trusted `/mcp` address without token material. A local address is only reachable from the Agent's execution machine; deployment is separate.
 
 ## Hold'em rules
 
@@ -62,9 +68,9 @@ Only Hold'em is implemented. `RuleSet` reserves separate public/private views, o
 
 Use `npm ci`, `npm run check`, `npm run plugin:check` and `npm run test:e2e`. Scoped rule/service tests are `npm run test --workspace @tablemesh/core` and `npm run test --workspace @tablemesh/server`. `npm run dev` starts the three local services; `node packages/server/dist/mcp.js` starts the built stdio adapter.
 
-Checks cover two-account HTTP play, SDK tools, unauthorized actions/private reads, stale and duplicate requests, deadlines/restart, Hold'em payouts, starter ledger uniqueness, last-stock redemption and owner-only code access. Browser checks cover the two web apps and session restoration. SDK/launcher checks do not establish Codex-host installation or public directory approval.
+Checks cover two-account HTTP play, SDK tools, unauthorized actions/private reads, stale and duplicate requests, deadlines/restart, Hold'em payouts, starter ledger uniqueness, last-stock redemption and owner-only code access. Browser checks cover the two web apps and session restoration. SDK/launcher checks do not establish Codex-host installation or public directory approval. A separate Codex CLI 0.158.0 app-server check used an ephemeral thread and runtime MCP configuration to list all eleven tools and call account/observation/wait/action through the actual HTTP host. It made no model turn and does not establish autonomous strategy, plugin installation or continuous background execution.
 
-Follow-up work includes public HTTPS MCP authorization, real reward economics, deployment/recovery, supplier fulfillment, Tractor/Mahjong, multi-instance room ownership and streaming notifications.
+Follow-up work includes public HTTPS deployment and MCP OAuth authorization, real reward economics, deployment/recovery, supplier fulfillment, Tractor/Mahjong, multi-instance room ownership and streaming notifications.
 
 ## References checked 2026-10-03
 
@@ -74,3 +80,5 @@ Follow-up work includes public HTTPS MCP authorization, real reward economics, d
 - [Plugin packaging](https://developers.openai.com/plugins/build/plugins) and [MCP server guide](https://developers.openai.com/plugins/build/mcp-server). Portable plugin.json/mcp.json and the Codex compatibility overlay are included. Local package checks do not imply public acceptance.
 - [MCP security](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices).
 - [PokerTDA rules](https://www.pokertda.com/poker-tda-rules/) and [MikeB's short-opening explanation, #9](https://www.pokertda.com/forum/index.php?topic=186.0). Tokem implements the digital rules above; full tournament-rule conformance is not claimed.
+
+The optional real-host check is `node scripts/check-codex-host.mjs` after building. It requires an existing Codex CLI (verified 0.158.0), uses runtime overrides and an ephemeral thread, and never starts a model turn or installs/configures the client. Evidence defaults to a temporary directory; TABLEMESH_HOST_CHECK_EVIDENCE_DIR can select a task directory. A missing CLI or unsupported host method is a failed check, not an installation request.

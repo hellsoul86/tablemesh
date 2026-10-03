@@ -45,11 +45,13 @@ All rejected stale versions return VERSION_CONFLICT+currentStateVersion. Clients
 
 ## Observations and reconnect
 
-v0 polling is sufficient: GET events after cursor every 1s in web, explicit observe calls in MCP. An events response always includes a fresh viewer-filtered snapshot. A cursor beyond the room head sets reset=true. Persist cursor monotonically per room. Public events contain public facts only; hole-card deal/deck events are server audience. A future SSE adapter can send `room_changed {stateVersion,eventCursor}` then fetch snapshot, with cookie authorization and origin checks. Snapshots remain the reconnect source of state.
+Web polls GET events after cursor every 1s. MCP clients observe explicitly or use the bounded wait tool. An events response always includes a fresh viewer-filtered snapshot. A cursor beyond the room head sets reset=true. Persist cursor monotonically per room. Public events contain public facts only; hole-card deal/deck events are server audience. A future SSE adapter can send `room_changed {stateVersion,eventCursor}` then fetch snapshot, with cookie authorization and origin checks. Snapshots remain the reconnect source of state.
 
-## MCP stdio tools
+## MCP tools and transports
 
-The SDK stdio process is a narrow HTTP client authenticated by TABLEMESH_TOKEN and pointed at TABLEMESH_URL (default loopback). The adapter has no database or reward/admin tools and makes no model calls. Diagnostics go to stderr; stdout contains MCP protocol only. Tool names and args:
+Both transports use the same `createGameMcpServer` registry and the same authenticated game API. Tokem does not run the user's model or require a model API key. The stdio process reads TABLEMESH_TOKEN and TABLEMESH_URL (default loopback); diagnostics go to stderr, stdout contains MCP protocol only. HTTP uses `/mcp` on the API listener and requires a game bearer token on every request. Cookie-only clients cannot use it. Each POST gets a stateless SDK server/transport with JSON responses; GET and DELETE return 405. No MCP session ID grants account access.
+
+Tool names and args:
 
 | Tool | Args | Maps to |
 |---|---|---|
@@ -63,10 +65,17 @@ The SDK stdio process is a narrow HTTP client authenticated by TABLEMESH_TOKEN a
 | tablemesh_observe | `{roomId,after?}` | snapshot/events |
 | tablemesh_legal_actions | `{roomId}` | observe snapshot.you.legalActions+version+windowId |
 | tablemesh_act | `{roomId,stateVersion,windowId,requestId,action}` | actions |
+| tablemesh_wait_for_turn | `{roomId,afterStateVersion,maxWaitMs?}` | GET /rooms/:id/wait |
 
 Return human-readable JSON text plus structuredContent containing the same ApiResult; error tools set isError. Mutating tools annotated readOnlyHint:false/destructiveHint:false/idempotentHint:true; observation readOnlyHint:true. Tool output text is data, not instructions; room names/display names untrusted. The plugin skill tells Codex to inspect current state and legalActions before each action, pass exact version/window, and use the server-provided private view. Users control whether their Codex acts automatically; the server enforces deadlines.
 
-Public Streamable HTTP is not implemented. Adding it requires MCP authorization and origin protections. The local stdio adapter needs a game token, not a model key.
+`GET /rooms/:id/wait?afterStateVersion=N&maxWaitMs=N` returns `ApiResult<{reason,snapshot:RoomSnapshot}>`. `afterStateVersion` is a nonnegative integer; maxWaitMs is an integer 0..25000, default 20000. Return priority is `your_turn` when the viewer has legal actions, `hand_complete` when the hand is complete, `state_changed` when the current version differs, and `timeout` when the wait budget expires. An already changed version returns immediately. Clients can decide from the fresh snapshot or wait again with its version. Normal deadlines still run through the existing scheduler; waiting submits no action.
+
+Waits hold no room queue or database transaction. Each poll and final response recheck the credential before building the viewer projection. At most two waits per account and 100 across the process are pending; further waits return RATE_LIMITED. Cancellation, network close or server shutdown releases the wait without leaving the seat or confirming abandonment. For stateless HTTP, cancellation notifications can arrive on a different POST; a temporary pending-wait map binds the typed JSON-RPC request ID to the authenticated account and game credential ID. It cancels only that pending wait, never an accepted action; duplicate active IDs cannot replace entries. Different clients should use separate game tokens to avoid sharing a cancellation namespace. This is not a persisted MCP session or an account-authority cache. The stdio wait network limit is 30 seconds; ordinary calls are limited to 10 seconds. Client tool timeouts should exceed 25 seconds. No tool wakes an idle chat or starts a background strategy loop.
+
+`GET /agent-connection` requires a web session and returns `{mcpUrl:string|null,transport:'streamable-http',authentication:'game-bearer',tokenEnvVar:'TABLEMESH_TOKEN',maxWaitMs:25000}`. The URL comes from explicit TABLEMESH_MCP_PUBLIC_URL or the actual loopback listener; it is not derived from browser/Host/Forwarded headers. Public URL configuration accepts HTTPS or loopback HTTP at `/mcp`, with no credentials/query/hash. A non-loopback listener without a configured URL returns null. This metadata contains no token. Connection templates refer to the environment variable; creating a game token remains a separate, once-visible web operation.
+
+Static game bearer credentials support manually configured clients. OAuth discovery/login, hosted deployment and public directory submission are separate work. For [Codex](https://learn.chatgpt.com/docs/extend/mcp?surface=cli), configure a Streamable HTTP `url`, `bearer_token_env_var="TABLEMESH_TOKEN"` and `tool_timeout_sec=45`; local stdio remains available. Local URLs must be reachable from the Agent's execution machine. Losing or stopping a client does not stop the server deadline; only an explicit confirmed leave applies abandonment policy.
 
 
 ## Confirmed abandonment, deadline ordering and public settlement history

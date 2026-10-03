@@ -1,9 +1,12 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { setMaxListeners } from 'node:events';
 import { randomInt, randomUUID, randomBytes, createCipheriv, createDecipheriv, createHmac } from 'node:crypto';
 import { createTable, setSeats, startHand, applyAction, applyTimeout, getPublicState, getPrivateState, getLegalActions } from '@tablemesh/core';
 import type { AccountView, HoldemConfig, HoldemEngineState, EngineResult, RoomSnapshot, RoomMutationResult, RedemptionView, RewardProduct, PointsEntry, ApiResult, Json } from '@tablemesh/core/contracts';
 import { Store } from './db.js';
-import { readConfig, type AppConfig } from './config.js';
+import { readConfig, mcpPublicUrl, type AppConfig } from './config.js';
+import { handleGameMcp, McpWaitCancellation } from './mcp-http.js';
+import type { GameApi } from './mcp-tools.js';
 import { AppError, fail, object, exactKeys, text, integer, canonical, hash, sameSecret, newToken, password, passwordHash, passwordMatches, readJson } from './util.js';
 
 interface Identity { accountId: string; sessionId: string; kind: 'web' | 'game' }
@@ -43,9 +46,15 @@ export class Application {
   private readonly rate = new Map<string, { count: number; until: number }>();
   private readonly timer: ReturnType<typeof setInterval> | null;
   private closing = false;
+  private readonly shutdown = new AbortController();
+  private readonly mcpWaits = new McpWaitCancellation();
+  private readonly waiters = new Map<string, number>();
+  private waiterCount = 0;
 
   constructor(overrides: Partial<AppConfig> = {}) {
     this.config = { ...readConfig(), ...overrides };
+    this.config.mcpPublicUrl = mcpPublicUrl(this.config.mcpPublicUrl);
+    setMaxListeners(101, this.shutdown.signal); // At most 100 pending wait listeners.
     this.store = new Store(this.config.databasePath);
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.requestTimeout = 15_000;
@@ -63,6 +72,8 @@ export class Application {
   }
   async close(): Promise<void> {
     this.closing = true;
+    this.shutdown.abort();
+    this.mcpWaits.close();
     if (this.timer) clearInterval(this.timer);
     if (this.server.listening) await new Promise<void>((resolve, reject) => this.server.close(error => error ? reject(error) : resolve()));
     await Promise.allSettled([...this.queues.values()]);
@@ -104,6 +115,119 @@ export class Application {
     return { accountId: row.account_id, sessionId: row.id, kind: row.kind };
   }
   private webOnly(identity: Identity): void { if (identity.kind !== 'web') fail('FORBIDDEN', 'A web session is required for this operation', 403); }
+  private activeIdentity(identity: Identity): void {
+    if (!this.store.one('SELECT id FROM sessions WHERE id=? AND account_id=? AND kind=? AND revoked_at IS NULL AND expires_at>?',
+      identity.sessionId, identity.accountId, identity.kind, this.config.now())) fail('UNAUTHENTICATED', 'Session expired or revoked', 401);
+  }
+  private listenerUrl(): URL {
+    const address = this.server.address();
+    if (!address || typeof address === 'string') throw new Error('Server is not listening');
+    const host = address.address === '0.0.0.0' ? '127.0.0.1' : address.address === '::' ? '::1' : address.address;
+    return new URL(`http://${host.includes(':') ? `[${host}]` : host}:${address.port}`);
+  }
+  private agentConnection(): { mcpUrl: string | null; transport: 'streamable-http'; authentication: 'game-bearer'; tokenEnvVar: 'TABLEMESH_TOKEN'; maxWaitMs: 25000 } {
+    const address = this.server.address();
+    const local = address && typeof address !== 'string' && ['127.0.0.1', '::1'].includes(address.address);
+    return { mcpUrl: this.config.mcpPublicUrl ?? (local ? new URL('/mcp', this.listenerUrl()).href : null),
+      transport: 'streamable-http', authentication: 'game-bearer', tokenEnvVar: 'TABLEMESH_TOKEN', maxWaitMs: 25000 };
+  }
+  private mcpHost(req: IncomingMessage): void {
+    const host = req.headers.host?.toLowerCase();
+    const address = this.server.address();
+    if (!host || !address || typeof address === 'string') fail('FORBIDDEN', 'MCP Host is not allowed', 403);
+    const allowed = new Set([this.listenerUrl().host.toLowerCase()]);
+    if (['127.0.0.1', '::1', '0.0.0.0', '::'].includes(address.address)) {
+      for (const loopback of ['127.0.0.1', 'localhost', '[::1]']) allowed.add(`${loopback}:${address.port}`);
+    }
+    // A public authority is trusted only when explicitly supplied by the operator.
+    if (this.config.mcpPublicUrl) allowed.add(new URL(this.config.mcpPublicUrl).host.toLowerCase());
+    if (!allowed.has(host)) fail('FORBIDDEN', 'MCP Host is not allowed', 403);
+  }
+  private async mcp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    this.mcpHost(req);
+    this.origin(req, false);
+    if (!req.headers.authorization) fail('UNAUTHENTICATED', 'A game bearer token is required', 401);
+    const identity = this.identity(req);
+    if (identity.kind !== 'game') fail('FORBIDDEN', 'A game bearer token is required', 403);
+    if (req.method !== 'POST') {
+      res.statusCode = 405;
+      res.setHeader('Allow', 'POST');
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32000, message: 'Method not allowed' } }));
+      return;
+    }
+    const authorization = req.headers.authorization;
+    const target = this.listenerUrl();
+    const controller = new AbortController();
+    const disconnected = () => { if (!res.writableEnded) controller.abort(); };
+    req.once('aborted', disconnected);
+    res.once('close', disconnected);
+    const api: GameApi = async (path, method = 'GET', body, signal) => {
+      try {
+        // The target is this listener, never a URL obtained from tool arguments.
+        const response = await fetch(new URL('/api' + path, target), {
+          method, headers: { Authorization: authorization, ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) },
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }), redirect: 'error',
+          signal: AbortSignal.any([controller.signal, this.shutdown.signal, AbortSignal.timeout(30_000), ...(signal ? [signal] : [])])
+        });
+        const result = await response.json() as ApiResult<unknown>;
+        if (!result || typeof result.ok !== 'boolean') throw new Error('Invalid game response');
+        return result;
+      } catch {
+        return { ok: false, error: { code: 'INTERNAL', message: 'Tokem game request was interrupted. Observe current state before retrying a command.' } };
+      }
+    };
+    try { await handleGameMcp(req, res, api, this.mcpWaits, JSON.stringify([identity.accountId, identity.sessionId])); }
+    finally { req.off('aborted', disconnected); res.off('close', disconnected); }
+  }
+  private async waitForRoom(identity: Identity, id: string, url: URL, req: IncomingMessage, res: ServerResponse): Promise<unknown> {
+    for (const key of url.searchParams.keys()) if (!['afterStateVersion', 'maxWaitMs'].includes(key)) fail('INVALID_INPUT', 'Unexpected wait parameter');
+    const parse = (key: string, fallback: number, max: number) => {
+      const values = url.searchParams.getAll(key);
+      if (values.length > 1 || (values.length === 1 && !/^\d+$/u.test(values[0]!))) fail('INVALID_INPUT', `Invalid ${key}`);
+      return values.length ? integer(Number(values[0]), key, 0, max) : fallback;
+    };
+    if (!url.searchParams.has('afterStateVersion')) fail('INVALID_INPUT', 'afterStateVersion is required');
+    const after = parse('afterStateVersion', 0, Number.MAX_SAFE_INTEGER);
+    const maxWaitMs = parse('maxWaitMs', 20_000, 25_000);
+    const project = () => {
+      this.activeIdentity(identity);
+      const snapshot = this.snapshot(this.room(id), identity);
+      const reason = snapshot.you.legalActions.length ? 'your_turn' : snapshot.game.phase === 'complete' ? 'hand_complete'
+        : snapshot.stateVersion !== after ? 'state_changed' : null;
+      return { snapshot, reason };
+    };
+    const initial = project();
+    if (initial.reason || maxWaitMs === 0) return { ...initial, reason: initial.reason ?? 'timeout' };
+    if ((this.waiters.get(identity.accountId) ?? 0) >= 2 || this.waiterCount >= 100) fail('RATE_LIMITED', 'Too many pending game waits', 429);
+    this.waiters.set(identity.accountId, (this.waiters.get(identity.accountId) ?? 0) + 1);
+    this.waiterCount++;
+    const cancellation = new AbortController();
+    const abort = () => cancellation.abort();
+    const disconnected = () => { if (!res.writableEnded) abort(); };
+    req.once('aborted', abort);
+    res.once('close', disconnected);
+    this.shutdown.signal.addEventListener('abort', abort, { once: true });
+    const deadline = performance.now() + maxWaitMs;
+    try {
+      for (;;) {
+        if (cancellation.signal.aborted || this.closing) throw new AppError('INTERNAL', 'Game wait interrupted', 503);
+        const current = project();
+        if (current.reason || performance.now() >= deadline) return { ...current, reason: current.reason ?? 'timeout' };
+        await new Promise<void>(resolve => {
+          const onAbort = () => { clearTimeout(timer); resolve(); };
+          const timer = setTimeout(() => { cancellation.signal.removeEventListener('abort', onAbort); resolve(); }, Math.min(40, Math.max(1, deadline - performance.now())));
+          cancellation.signal.addEventListener('abort', onAbort, { once: true });
+        });
+      }
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', disconnected);
+      this.shutdown.signal.removeEventListener('abort', abort);
+      const remaining = (this.waiters.get(identity.accountId) ?? 1) - 1;
+      if (remaining) this.waiters.set(identity.accountId, remaining); else this.waiters.delete(identity.accountId);
+      this.waiterCount--;
+    }
+  }
   private origin(req: IncomingMessage, requireOrigin: boolean): void {
     const origin = req.headers.origin;
     if (origin ? !this.config.allowedOrigins.includes(origin) : requireOrigin) fail('FORBIDDEN', 'Origin is not allowed', 403);
@@ -228,6 +352,7 @@ export class Application {
   }
   private async roomMutation(identity: Identity, id: string, operation: string, body: Record<string, unknown>): Promise<RoomMutationResult> {
     return this.queue(id, () => {
+      this.activeIdentity(identity);
       const now = this.config.now();
       const preflight = this.request(identity.accountId, operation, id, body);
       // Successful dedup wins first. For a new command, commit the autonomous
@@ -393,6 +518,7 @@ export class Application {
     try {
       const path = new URL(req.url ?? '/', 'http://localhost').pathname;
       const method = req.method ?? 'GET';
+      if (path === '/mcp') { await this.mcp(req, res); return; }
       const mutation = ['POST', 'DELETE', 'PUT', 'PATCH'].includes(method);
       if (mutation) this.origin(req, req.headers.authorization === undefined);
       const body = mutation && method !== 'DELETE' ? await readJson(req) : {};
@@ -432,8 +558,9 @@ export class Application {
         else fail('NOT_FOUND', 'Endpoint not found', 404);
       } else {
         const identity = this.identity(req);
-        if (path.startsWith('/api/rewards/') || path.startsWith('/api/auth/')) this.webOnly(identity);
+        if (path.startsWith('/api/rewards/') || path.startsWith('/api/auth/') || path === '/api/agent-connection') this.webOnly(identity);
         if (method === 'GET' && path === '/api/account') data = this.account(identity.accountId);
+        else if (method === 'GET' && path === '/api/agent-connection') data = this.agentConnection();
         else if (method === 'POST' && path === '/api/auth/logout') {
           exactKeys(body, []);
           this.store.run('UPDATE sessions SET revoked_at=? WHERE id=?', this.config.now(), identity.sessionId);
@@ -461,10 +588,11 @@ export class Application {
           return { snapshot: this.snapshot(this.room(id), identity), replayed: false };
         });
         else if (path.startsWith('/api/rooms/')) {
-          const match = /^\/api\/rooms\/([^/]+)(?:\/(join|leave|start|actions|events))?$/u.exec(path);
+          const match = /^\/api\/rooms\/([^/]+)(?:\/(join|leave|start|actions|events|wait))?$/u.exec(path);
           if (!match) fail('NOT_FOUND', 'Endpoint not found', 404);
           const id = match[1]!; const operation = match[2];
           if (method === 'GET' && !operation) data = this.snapshot(this.room(id), identity);
+          else if (method === 'GET' && operation === 'wait') data = await this.waitForRoom(identity, id, new URL(req.url!, 'http://localhost'), req, res);
           else if (method === 'GET' && operation === 'events') {
             const row = this.room(id);
             const raw = new URL(req.url!, 'http://localhost').searchParams.get('after');
@@ -472,7 +600,7 @@ export class Application {
             const reset = after > row.event_cursor;
             const events = this.store.all<{ cursor: number; state_version: number; type: string; public_payload_json: string }>('SELECT * FROM room_events WHERE room_id=? AND cursor>? ORDER BY cursor LIMIT 200', id, reset ? 0 : after).map(event => ({ cursor: event.cursor, stateVersion: event.state_version, type: event.type, payload: JSON.parse(event.public_payload_json) as Json }));
             data = { events, snapshot: this.snapshot(row, identity), reset };
-          } else if (method === 'POST' && operation && operation !== 'events') data = await this.roomMutation(identity, id, operation === 'actions' ? 'action' : operation, body);
+          } else if (method === 'POST' && operation && !['events', 'wait'].includes(operation)) data = await this.roomMutation(identity, id, operation === 'actions' ? 'action' : operation, body);
           else fail('NOT_FOUND', 'Endpoint not found', 404);
         } else if (method === 'GET' && path === '/api/rewards/products') data = this.store.all<ProductRow>('SELECT * FROM products WHERE enabled=1').filter(product => product.sandbox || this.config.realRewardsEnabled).map((row): RewardProduct => ({ id: row.id, name: row.name, pointsCost: row.points_cost, sandbox: Boolean(row.sandbox), available: this.store.one<{ n: number }>('SELECT COUNT(*) n FROM inventory WHERE product_id=? AND status=?', row.id, 'available')!.n }));
         else if (method === 'POST' && path === '/api/rewards/redemptions') data = this.redeem(identity, body);
@@ -490,6 +618,7 @@ export class Application {
       }
       res.end(JSON.stringify({ ok: true, data } satisfies ApiResult<unknown>));
     } catch (error) {
+      if (res.destroyed || res.writableEnded) return;
       const failure = error instanceof AppError ? error : new AppError('INTERNAL', 'Server could not complete this request', 500);
       if (!(error instanceof AppError)) console.error('Tokem request failed');
       res.statusCode = failure.status;
