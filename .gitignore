@@ -23,3 +23,5 @@ coverage/
 *.session
 *.session.json
 *.log
+*.provider-key
+*.provider-key.*.tmp

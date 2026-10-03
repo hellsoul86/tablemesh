@@ -2,7 +2,7 @@
 
 ## v0
 
-Tokem runs a multi-account Texas Hold'em service, a player web app, a separate rewards web app and a local Codex plugin. People and agents use the same accounts, seat permissions, actions and deadlines. Registration and login create the identity; the plugin uses an issued game token. It makes no model calls and requires no OpenAI API key.
+Tokem runs a multi-account Texas Hold'em service, a player web app, a separate rewards web app and a local Codex plugin. People and agents use the same accounts, seat permissions, actions and deadlines. Registration and login create the identity; the plugin uses an issued game token. The Codex plugin makes no model calls. Manual play needs no model key; optional server autoplay uses the account’s saved model connection.
 
 Joining a seat makes it ready. The owner can start with at least two funded seats. Practice chips belong to the table; platform points belong to the account ledger. Chips cannot buy points or be redeemed. v0 uses demo starter points and sandbox inventory, with real rewards disabled by default. A separate rewards website limits access to card secrets; it does not exempt the product from platform review. Public plugin submission, hosting and real reward economics are follow-up work.
 
@@ -13,7 +13,7 @@ The repository uses npm workspaces, ESM, strict TypeScript and Node >=22.13. Dep
 | Package | Responsibility | Runtime dependencies |
 |---|---|---|
 | packages/core | Serializable Hold'em reducer/evaluator and browser-safe DTOs | None |
-| packages/server | Sessions, HTTP, room scheduler, SQLite, points, inventory, redemption and stdio MCP adapter | core, Node builtins, MCP SDK, zod |
+| packages/server | Sessions, HTTP, room scheduler, SQLite, points, inventory, redemption, model providers/autoplay and stdio MCP adapter | core, Node builtins, MCP SDK, zod |
 | packages/web | Login, lobby, account/points, table and reconnect | Browser API client; Vite build |
 | packages/rewards-web | Catalog, redemption, owner code reveal and protected inventory UI | Browser API client; Vite build |
 | plugins/tablemesh | Manifests, launcher and gameplay skill | Built server adapter |
@@ -33,6 +33,7 @@ The current schema contains:
 - `requests`: unique account/operation/resource/request ID, body hash and accepted-result metadata. A repeated ID with a different body conflicts.
 - `wallets` and `ledger`: nonnegative available/held balances and unique ledger source keys. Wallet changes and entries share a transaction. The starter grant uses `starter:<account>:v0`; v0 has no game point grants.
 - `products`, `inventory` and `redemptions`: price and sandbox flag, encrypted codes with unique keyed fingerprints, one code assignment per redemption, and unique account/request IDs. `admin_audit` records operations without code plaintext.
+- `llm_configs` and `llm_tests`: one account configuration with encrypted provider credentials, plus reserved test IDs and safe test outcomes. Active autoplay controllers are not persisted.
 - `fair_play` and `room_abandons`: reputation, cooldown and one abandonment record per account/room/hand.
 - `hand_settlements`: one result and original account/seat/name snapshot per room/hand. Its public `hand_settled` event and published marker commit with room state.
 
@@ -54,6 +55,18 @@ Core takes a complete unique 52-card deck and time as inputs. The server shuffle
 - Evaluate the best five of seven by category and kickers, including the A2345 wheel. Showdown reveals nonfolded contenders; folded cards remain private. Validate deck uniqueness.
 - During a hand, `sum(stacks) + sum(contributions)` is constant. Settlement awards plus refunds equal contributions. After payout contributions clear, stacks remain nonnegative and starting the next hand does not pay the previous one again.
 
+## Optional model autoplay
+
+An account can configure OpenAI-compatible Chat Completions or Anthropic Messages and enable its current seat’s controller. The base URL is an API prefix: for example `https://api.openai.com/v1`, `http://127.0.0.1:11434/v1`, or `https://api.anthropic.com/v1`. The adapter appends `/chat/completions` or `/messages`; it does not infer `/v1`. OpenAI-compatible output limits use the saved `max_tokens` or `max_completion_tokens` field, defaulting to `max_tokens`; Anthropic uses `max_tokens`. There is no automatic fallback or retry. Anthropic credentials must work without a workspace-selection header; multi-workspace keys needing `anthropic-workspace-id` are not supported.
+
+`autoplay.ts` owns the process-local controller; `provider.ts` owns configuration, encrypted keys and bounded HTTP. The controller receives no credentials. A prompt contains only numeric poker fields, the viewer’s hole cards, public board/pots, legal actions, game settings and a random decision nonce. It excludes names, account/room/hand IDs, sessions, rewards and the internal deck. Output is exactly `{decisionNonce,action}`. The controller checks nonce, current legal amount, room version, window, deadline and originating session, then submits through the same room reducer as manual play. A guard runs again inside the room queue.
+
+Model network work runs outside room queues and SQLite transactions. One account/room has one unfinished job; cancellation retains that job until it settles, so a noncooperative provider cannot overlap a resumed job. Stop, manual takeover, configuration changes, revoked/expired credentials, abandonment and stale results prevent late submission. Ordinary server timeout still checks or folds. Stopping autoplay does not leave the seat or penalize reputation.
+
+Autoplay continues at the same table across hands, but does not create a room, sit down or start a hand. Restart defaults to stopped and requires a new explicit start. Each dispatched request counts, including failed/cancelled requests. Defaults are 5 seconds, 256 output tokens, 20 requests per hand and 100 per run; accepted ranges are 1–30 seconds, 64–1024 tokens, 1–60 per hand and 1–500 per run. The request timeout is shortened to the remaining turn time minus a 25ms margin. Pause/resume preserves the current-hand count; a new explicit start resets the run count. These are request/token budgets, not a currency cost guarantee; the supplier may bill a cancelled request.
+
+Configuration tests reserve their request ID before network work. Replays return the existing result; interrupted tests do not dispatch again after restart. The configured model may charge for a test. Fake local providers validate both protocols and controller races without paid API calls.
+
 ## Other games
 
 Only Hold'em is implemented. `RuleSet` reserves separate public/private views, optional team IDs and single/parallel response windows for future games. Tractor teams and Mahjong claim priority need their own reducers and tests. Parallel response windows collect intents against a common baseline and resolve serially; they do not permit concurrent mutation of state. Game-specific views and actions can extend the discriminated union when those engines exist.
@@ -74,3 +87,5 @@ Follow-up work includes public HTTPS MCP authorization, real reward economics, d
 - [Plugin packaging](https://developers.openai.com/plugins/build/plugins) and [MCP server guide](https://developers.openai.com/plugins/build/mcp-server). Portable plugin.json/mcp.json and the Codex compatibility overlay are included. Local package checks do not imply public acceptance.
 - [MCP security](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices).
 - [PokerTDA rules](https://www.pokertda.com/poker-tda-rules/) and [MikeB's short-opening explanation, #9](https://www.pokertda.com/forum/index.php?topic=186.0). Tokem implements the digital rules above; full tournament-rule conformance is not claimed.
+
+- [Anthropic authentication](https://platform.claude.com/docs/en/manage-claude/authentication): workspace-scoped keys can omit workspace selection; this adapter does not configure the additional header required by multi-workspace keys.

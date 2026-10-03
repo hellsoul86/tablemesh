@@ -11,6 +11,7 @@ export interface AppConfig {
   starterPoints: number;
   adminToken: string | null;
   inventoryKey: Buffer | null;
+  providerKey: Buffer | null;
   realRewardsEnabled: boolean;
   secureCookies: boolean;
   schedulerIntervalMs: number;
@@ -25,6 +26,9 @@ function integer(raw: string | undefined, fallback: number): number {
 }
 
 export function readConfig(): AppConfig {
+  const providerRaw = process.env.TABLEMESH_PROVIDER_KEY;
+  const providerKey = providerRaw ? Buffer.from(providerRaw, 'base64') : null;
+  if (providerKey && (providerKey.length !== 32 || providerKey.toString('base64') !== providerRaw)) throw new Error('TABLEMESH_PROVIDER_KEY must contain a canonical base64 32-byte key');
   const rawKey = process.env.TABLEMESH_INVENTORY_KEY;
   const inventoryKey = rawKey ? Buffer.from(rawKey, 'base64') : null;
   if (inventoryKey && (inventoryKey.length !== 32 || inventoryKey.toString('base64') !== rawKey)) {
@@ -41,6 +45,7 @@ export function readConfig(): AppConfig {
     starterPoints: integer(process.env.TABLEMESH_STARTER_POINTS, 1000),
     adminToken: process.env.TABLEMESH_ADMIN_TOKEN || null,
     inventoryKey,
+    providerKey,
     realRewardsEnabled: process.env.TABLEMESH_REAL_REWARDS === 'true',
     secureCookies: process.env.TABLEMESH_SECURE_COOKIES === 'true',
     schedulerIntervalMs: 100,

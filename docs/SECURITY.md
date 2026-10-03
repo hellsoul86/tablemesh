@@ -26,6 +26,18 @@ Successful request dedup precedes version checks. A matching request ID/body rep
 
 Active-hand accounts and slots stay fixed until settlement. Confirmed abandonment folds a non-all-in participant in the current or next legal window; all-in contributions and payout rights remain. One account/room/hand incurs one persisted penalty: first abandonment is reputation −10 and a 5-minute cooldown; another within 24 hours is −20 and 15 minutes, with reputation floored at 0. Cooldown blocks new tables, joins and new hands, but permits existing-hand actions and observation. Disconnect, refresh and normal timeout do not confirm abandonment or penalize points. If timeout changes the version before a confirmation is accepted, the rejected confirmation incurs no penalty.
 
+## Model credentials and controller authority
+
+Users save model connections through their own web session. Game tokens read safe readiness metadata and may start/stop their own table, but cannot save, delete, test or retrieve model keys. Stored credentials use AES-256-GCM with account-bound associated data and an encryption key separate from inventory. A missing `TABLEMESH_PROVIDER_KEY` override causes atomic generation of a private `tablemesh.provider-key` file beside the SQLite database, with mode 0600. Existing previews reuse the same directory and key. In-memory test databases use ephemeral keys. Backups need both database and key; changing or losing the key does not decrypt old credentials. Neither key file nor database belongs in public commits.
+
+Endpoints permit public HTTPS or explicit loopback HTTP/HTTPS. Credentials, query strings and fragments in URLs are rejected. Resolution rejects private/reserved destinations for public endpoints and pins the checked address for that request; redirects are rejected. Keyless operation is limited to loopback OpenAI-compatible services. DNS validation, cancellation, response-size and timeout limits apply to both protocols. Operator configuration remains a trust boundary for local model addresses and remote providers.
+
+The model sees a selected poker observation, never full room/engine JSON: numeric seat/chip/bet/status fields, public cards/pots, own hole cards, settings, legal actions and a fresh nonce. Account IDs, player/room names, sessions, model credentials, internal deck and reward codes are excluded. A strict nonce/action response is checked again against the latest own view and inside the authoritative queue. Raw model output and provider errors stay out of responses, events and logs.
+
+Controllers bind the session that enabled them. Stop, manual takeover, configuration replacement, credential revocation, abandonment, a stale decision or a model error cancels/pauses work. Session expiry is revalidated at dispatch and submission. Abort is best effort at the supplier; generation and queue guards prevent an old response from placing an action. Restart does not restore active model work. Normal poker deadlines, all-in rights and confirmed-leave penalties are unchanged. Stopping autoplay is not abandonment.
+
+Request/output-token caps limit automatic calls but do not promise a monetary spending cap. Tests may incur one supplier request; the test ID is reserved durably so duplicate requests and recovery do not dispatch it twice. Cancelled or timed-out requests may still be billable. Model expenses are not platform points or table chips.
+
 ## Points and reward codes
 
 Practice chips do not change the platform wallet. v0 has no paid buy-in, recharge, cash withdrawal or win-based point grant. Starter points and inventory are labeled sandbox. Real rewards are disabled by default; configuration alone does not resolve their economic, supplier or policy requirements.
@@ -46,6 +58,7 @@ Redemption assigns stock and records reserve/capture entries in one BEGIN IMMEDI
 6. Owner-only code reveal, missing-key behavior, encrypted storage and secret-free list/tool/log output are checked.
 7. Two separate browser accounts play against the service. Refresh restores the session, and a stale action requires a fresh decision.
 8. Abandonment confirmation, one-time persistent punishment, cooldown, passive network recovery and all-in rights are checked independently of normal timeouts.
+9. Fake providers check both protocols, encrypted credentials, safe status, test dedup, manual/stop/revoke cancellation, queued late results, deadlines and request budgets without paid API calls.
 
 ## References
 

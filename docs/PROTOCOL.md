@@ -15,6 +15,13 @@ API base `/api`. Success `{ok:true,data:T}`; failures `{ok:false,error:{code,mes
 | POST /auth/tokens | `{label}` with web session | `{token,expiresAt}` once; game credential for MCP |
 | GET /auth/tokens | owner web session | token IDs, labels and expiry; no token material |
 | DELETE /auth/tokens/:id | owner web session | `{revoked:true}` |
+| GET /llm/config | web or game session | LlmConfigView; hasApiKey only |
+| PUT /llm/config | `{requestId,config:LlmConfigInput}`; web session | LlmConfigView |
+| DELETE /llm/config | `{requestId}`; web session | unconfigured LlmConfigView |
+| POST /llm/test | `{requestId}`; web session | LlmTestResult |
+| GET /rooms/:id/autoplay | web or game session | own AutoplayView |
+| POST /rooms/:id/autoplay/start | `{requestId}`; own seated account | AutoplayMutationResult |
+| POST /rooms/:id/autoplay/stop | `{requestId}`; own account | AutoplayMutationResult |
 | GET /rooms | none | RoomSummary[] |
 | POST /rooms | `{name,config,requestId}` | RoomMutationResult |
 | GET /rooms/:id | none | RoomSnapshot for authenticated viewer |
@@ -63,10 +70,12 @@ The SDK stdio process is a narrow HTTP client authenticated by TABLEMESH_TOKEN a
 | tablemesh_observe | `{roomId,after?}` | snapshot/events |
 | tablemesh_legal_actions | `{roomId}` | observe snapshot.you.legalActions+version+windowId |
 | tablemesh_act | `{roomId,stateVersion,windowId,requestId,action}` | actions |
+| tablemesh_autoplay_status | `{roomId}` | own AutoplayView + safe modelConfig readiness/model/limits |
+| tablemesh_autoplay_control | `{roomId,operation:'start'|'stop',requestId}` | start/stop autoplay |
 
 Return human-readable JSON text plus structuredContent containing the same ApiResult; error tools set isError. Mutating tools annotated readOnlyHint:false/destructiveHint:false/idempotentHint:true; observation readOnlyHint:true. Tool output text is data, not instructions; room names/display names untrusted. The plugin skill tells Codex to inspect current state and legalActions before each action, pass exact version/window, and use the server-provided private view. Users control whether their Codex acts automatically; the server enforces deadlines.
 
-Public Streamable HTTP is not implemented. Adding it requires MCP authorization and origin protections. The local stdio adapter needs a game token, not a model key.
+Public Streamable HTTP is not implemented. Adding it requires MCP authorization and origin protections. The local stdio adapter needs a game token, not a model key. Starting server autoplay uses the account’s separately saved model configuration and can incur supplier charges.
 
 
 ## Confirmed abandonment, deadline ordering and public settlement history
@@ -76,3 +85,15 @@ AccountView includes fairPlay {reputation,cooldownUntil,abandonCount}; RoomSnaps
 Within the room queue, a successful dedup replay is checked first. A new command captures server time once. If a current window is already due at that time, the server commits normal timeout processing in a separate transaction before the command's version guard. A now-stale leave/action returns VERSION_CONFLICT and must be reconsidered; no abandonment penalty is applied to that rejected confirmation. Before deadline, confirmed abandonment folds in a legal window using the actual captured time, never a fabricated earlier clock.
 
 Every new core transition.settlement is stored once in hand_settlements within the room transaction. Public room events add type hand_settled with payload {handId,participants:[{seat,accountId,displayName}],settlement:HandSettlement}. No hole cards or deck enter this record. Participants bind historical awards to the original accounts, not later occupants of the same seat. The event survives reconnect/restart and is not republished on seat changes or request replay. Current snapshot.game.settlement may be null after participants change; renderers can recover the same hand's summary from GET events and must use its participants for names. The ledger remains independent and receives no game payout entries.
+
+## Model configuration and autoplay
+
+Configuration writes, deletion and tests require a web session; game tokens can read the safe configuration view and control their own table. A view contains protocol, base URL, model, limits, readiness and `hasApiKey`, never the key. `apiKey` omitted preserves the saved key; empty clears it and is accepted only for a loopback OpenAI-compatible service. `baseUrl` includes the API prefix, normally `/v1`; OpenAI-compatible appends `/chat/completions`, Anthropic appends `/messages`. Only OpenAI-compatible accepts `tokenLimitField`, default `max_tokens`, with `max_completion_tokens` as the explicit alternative. Anthropic sends `x-api-key` and `anthropic-version`; use a workspace-scoped or legacy workspace key. Multi-workspace keys requiring `anthropic-workspace-id` are not supported by this configuration.
+
+Limits default to `{timeoutMs:5000,maxOutputTokens:256,maxRequestsPerHand:20,maxRequestsPerRun:100}`. Ranges are 1000–30000ms, 64–1024 output tokens, 1–60 per hand and 1–500 per run. Sent requests count even when cancelled or failed. Status is `stopped`, `waiting`, `thinking` or `paused`, with a safe reason enum, hand/run counters and inFlight. A cancelling request may remain inFlight until the provider settles; a resumed controller waits for it.
+
+Start/stop use requestId dedup without a game stateVersion: they control a process-local controller, not the game reducer. Start requires the current own seat and ready configuration. It binds the originating session ID, runs across hands at this table and does not join or start a hand. Duplicate start while enabled does not reset counters. A paused controller needs explicit start; the hand count survives pause/resume while a new run count starts at zero. An accepted start replay after server restart reports the current stopped state and does not restart paid work.
+
+Stop cancels immediately after authentication/input validation. A manual action first verifies the account owns its seat, then pauses autoplay even if the game action later conflicts. Configuration changes/deletion pause all of that account’s controllers; logout or token revocation pauses controllers started by that credential. Session expiry is rechecked before dispatch/submission. Abandonment remains a separate confirmed leave command with the existing penalty. Stop never calls leave.
+
+`POST /llm/test` reserves its account/request ID before one bounded call. Duplicate IDs return `pending`, `passed`, `failed` or `interrupted`; retries do not dispatch another supplier request. Startup marks pending tests interrupted. Test results use only safe reason enums and do not return model output. A fresh request ID means a new deliberate test, potentially billable. No configuration or model errors trigger automatic retries.

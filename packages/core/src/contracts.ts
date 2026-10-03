@@ -73,6 +73,38 @@ export interface RedemptionView { id: string; productId: string; pointsCost: num
  status: 'fulfilled' | 'failed' | 'pending'; sandbox: boolean; createdAt: number }
 export interface RedemptionSecret extends RedemptionView { code: string }
 
+
+/** User-managed model connection; secrets are accepted only by web configuration writes. */
+export type LlmProtocol = 'openai-compatible' | 'anthropic';
+export interface LlmLimits {
+ timeoutMs: number; maxOutputTokens: number; maxRequestsPerHand: number; maxRequestsPerRun: number;
+}
+export interface LlmConfigInput {
+ protocol: LlmProtocol; baseUrl: string; model: string; limits: LlmLimits;
+ apiKey?: string; // omitted retains the stored key; empty clears it for a local OpenAI-compatible service
+ tokenLimitField?: 'max_tokens' | 'max_completion_tokens'; // OpenAI-compatible only, default max_tokens
+}
+export interface LlmConfigView {
+ configured: boolean; ready: boolean; protocol: LlmProtocol | null;
+ baseUrl: string | null; model: string | null; hasApiKey: boolean;
+ limits: LlmLimits; updatedAt: number | null;
+ tokenLimitField?: 'max_tokens' | 'max_completion_tokens';
+}
+export type AutoplayPhase = 'stopped' | 'waiting' | 'thinking' | 'paused';
+export type AutoplayReason = 'USER_STOP' | 'MANUAL_TAKEOVER' | 'MODEL_ERROR' | 'INVALID_RESPONSE'
+ | 'REQUEST_TIMEOUT' | 'STALE_STATE' | 'HAND_BUDGET' | 'RUN_BUDGET' | 'CONFIG_CHANGED'
+ | 'CREDENTIAL_REVOKED' | 'ABANDONED' | 'SEAT_LOST' | 'SERVER_RESTART';
+export interface AutoplayView {
+ roomId: RoomId; phase: AutoplayPhase; reason: AutoplayReason | null;
+ handId: HandId | null; requestsThisHand: number; requestsThisRun: number;
+ inFlight: boolean; startedAt: number | null; updatedAt: number;
+}
+export interface AutoplayMutationResult { autoplay: AutoplayView; replayed: boolean }
+export interface LlmTestResult {
+ status: 'passed' | 'failed' | 'pending' | 'interrupted';
+ reason: 'OK' | 'MODEL_ERROR' | 'INVALID_RESPONSE' | 'REQUEST_TIMEOUT' | 'SERVER_RESTART' | null;
+}
+
 /** Internal engine state. HTTP/MCP serializers use viewer projections. */
 export interface HoldemEngineState {
  config: HoldemConfig; publicState: HoldemPublicState;

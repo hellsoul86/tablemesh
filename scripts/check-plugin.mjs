@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { fixture, twoPlayerRoom } from '../packages/server/test/helpers.mjs';
+import { startFakeProvider } from '../packages/server/test/support/fake-provider.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const pluginRoot = fileURLToPath(new URL('../plugins/tablemesh/', import.meta.url));
@@ -24,6 +25,7 @@ assert.equal(/\/Users\/|\/home\/|CLAUDE_PLUGIN_ROOT/.test(JSON.stringify(config)
 const args = config.args.map(arg => arg.replaceAll('${PLUGIN_ROOT}', pluginRoot.replace(/\/$/, '')));
 assert.equal(args.some(arg => /\$\{/.test(arg)), false);
 const f = await fixture();
+const model = await startFakeProvider();
 let client;
 try {
   const room = await twoPlayerRoom(f);
@@ -36,9 +38,10 @@ try {
   client = new Client({ name: 'tablemesh-plugin-check', version: '0.1.0' });
   await client.connect(transport);
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 10);
+  assert.equal(tools.tools.length, 12);
   assert.equal(tools.tools.some(tool => /reward|secret|admin|inventory/i.test(tool.name)), false);
   for (const tool of tools.tools) assert.equal(tool.annotations?.idempotentHint, true);
+  assert.equal(tools.tools.find(tool => tool.name === 'tablemesh_autoplay_control').annotations.openWorldHint, true);
   const call = async (name, arguments_ = {}) => {
     const response = await client.callTool({ name, arguments: arguments_ });
     assert.ok(response.structuredContent);
@@ -49,6 +52,26 @@ try {
   };
   const account = await call('tablemesh_account');
   assert.equal(account.data.id, room.a.account.id);
+  const stopped = await call('tablemesh_autoplay_control', { roomId: room.id, operation: 'stop', requestId: randomUUID() });
+  assert.equal(stopped.ok, true);
+  assert.equal(stopped.data.autoplay.phase, 'stopped');
+  assert.equal((await call('tablemesh_autoplay_status', { roomId: room.id })).data.phase, 'stopped');
+  const missingConfig = await call('tablemesh_autoplay_control', { roomId: room.id, operation: 'start', requestId: randomUUID() });
+  assert.equal(missingConfig.ok, false);
+  const syntheticKey = 'synthetic-plugin-key';
+  assert.equal((await room.a.request('/llm/config', { requestId: randomUUID(), config: { protocol: 'openai-compatible', baseUrl: model.baseUrl, model: 'synthetic', apiKey: syntheticKey,
+    limits: { timeoutMs: 5000, maxOutputTokens: 256, maxRequestsPerHand: 20, maxRequestsPerRun: 100 } } }, 'PUT')).body.ok, true);
+  const modelStatus = await call('tablemesh_autoplay_status', { roomId: room.id });
+  assert.equal(modelStatus.data.modelConfig.ready, true);
+  assert.equal(JSON.stringify(modelStatus).includes(syntheticKey), false);
+  assert.equal((await call('tablemesh_autoplay_control', { roomId: room.id, operation: 'start', requestId: randomUUID() })).ok, true);
+  for (let n = 0; n < 100; n++) {
+    if ((await room.a.request(`/rooms/${room.id}`)).body.data.game.actorSeat !== 0) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
+  assert.equal(model.requests.length, 1);
+  assert.equal((await room.a.request(`/rooms/${room.id}`)).body.data.game.actorSeat, 1);
+  assert.equal((await call('tablemesh_autoplay_control', { roomId: room.id, operation: 'stop', requestId: randomUUID() })).data.autoplay.phase, 'stopped');
   const lobby = await call('tablemesh_lobby');
   assert.equal(lobby.data.some(item => item.id === room.id), true);
   let snapshot = (await call('tablemesh_observe', { roomId: room.id })).data;
@@ -85,8 +108,9 @@ try {
   assert.equal(points.data.account.points, 1000);
   assert.equal(JSON.stringify(points).includes('code_ciphertext'), false);
   assert.equal(stderr.includes(minted.body.data.token), false);
-  console.log(`Tokem plugin check: PASS (launcher spawned, 10 tools, ${toolMoves} game actions, explicit abandonment guard; host installation unverified).`);
+  console.log(`Tokem plugin check: PASS (launcher spawned, 12 tools, ${toolMoves} game actions, 1 local model action, autoplay controls and explicit abandonment guard; host installation unverified).`);
 } finally {
   await client?.close();
   await f.close();
+  await model.close();
 }

@@ -47,6 +47,15 @@ export class Store {
         request_id TEXT NOT NULL, body_hash TEXT NOT NULL, result_json TEXT NOT NULL,
         PRIMARY KEY(account_id,operation,resource_id,request_id)
       );
+      CREATE TABLE IF NOT EXISTS llm_configs (
+        account_id TEXT PRIMARY KEY REFERENCES accounts(id), config_json TEXT NOT NULL,
+        key_ciphertext TEXT, updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS llm_tests (
+        account_id TEXT NOT NULL REFERENCES accounts(id), request_id TEXT NOT NULL,
+        body_hash TEXT NOT NULL, result_json TEXT NOT NULL, created_at INTEGER NOT NULL,
+        PRIMARY KEY(account_id,request_id)
+      );
       CREATE TABLE IF NOT EXISTS products (
         id TEXT PRIMARY KEY, name TEXT NOT NULL, points_cost INTEGER NOT NULL CHECK(points_cost>0),
         sandbox INTEGER NOT NULL CHECK(sandbox IN (0,1)), enabled INTEGER NOT NULL DEFAULT 1

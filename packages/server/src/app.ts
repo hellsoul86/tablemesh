@@ -1,7 +1,9 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { randomInt, randomUUID, randomBytes, createCipheriv, createDecipheriv, createHmac } from 'node:crypto';
 import { createTable, setSeats, startHand, applyAction, applyTimeout, getPublicState, getPrivateState, getLegalActions } from '@tablemesh/core';
-import type { AccountView, HoldemConfig, HoldemEngineState, EngineResult, RoomSnapshot, RoomMutationResult, RedemptionView, RewardProduct, PointsEntry, ApiResult, Json } from '@tablemesh/core/contracts';
+import type { AccountView, HoldemConfig, HoldemEngineState, EngineResult, RoomSnapshot, RoomMutationResult, RedemptionView, RewardProduct, PointsEntry, ApiResult, Json, LlmTestResult } from '@tablemesh/core/contracts';
+import { AutoplayManager, AutoplayFault, type AutoplayAuthority } from './autoplay.js';
+import { ModelProvider, ProviderError, validateConfig } from './provider.js';
 import { Store } from './db.js';
 import { readConfig, type AppConfig } from './config.js';
 import { AppError, fail, object, exactKeys, text, integer, canonical, hash, sameSecret, newToken, password, passwordHash, passwordMatches, readJson } from './util.js';
@@ -39,6 +41,9 @@ export class Application {
   readonly config: AppConfig;
   readonly store: Store;
   readonly server;
+  readonly provider: ModelProvider;
+  readonly autoplay: AutoplayManager;
+  private readonly modelTests = new Set<AbortController>();
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly rate = new Map<string, { count: number; until: number }>();
   private readonly timer: ReturnType<typeof setInterval> | null;
@@ -47,6 +52,16 @@ export class Application {
   constructor(overrides: Partial<AppConfig> = {}) {
     this.config = { ...readConfig(), ...overrides };
     this.store = new Store(this.config.databasePath);
+    this.provider = new ModelProvider(this.store, this.config.databasePath, this.config.providerKey, this.config.now);
+    this.store.run('UPDATE llm_tests SET result_json=? WHERE json_extract(result_json,\'$.status\')=?', JSON.stringify({ status: 'interrupted', reason: 'SERVER_RESTART' }), 'pending');
+    this.autoplay = new AutoplayManager({
+      now: this.config.now, config: accountId => this.provider.view(accountId),
+      read: (authority, roomId) => this.queue(roomId, () => this.snapshot(this.room(roomId), this.authority(authority))),
+      decide: async input => { try { return await this.provider.decide(input); } catch (error) { throw new AutoplayFault(error instanceof ProviderError ? error.reason : 'MODEL_ERROR'); } },
+      submit: async (authority, roomId, command, guard) => {
+        await this.roomMutation(this.authority(authority), roomId, 'action', command as unknown as Record<string, unknown>, guard);
+      }
+    });
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.requestTimeout = 15_000;
     this.server.headersTimeout = 10_000;
@@ -63,6 +78,8 @@ export class Application {
   }
   async close(): Promise<void> {
     this.closing = true;
+    this.autoplay.close();
+    for (const abort of this.modelTests) abort.abort();
     if (this.timer) clearInterval(this.timer);
     if (this.server.listening) await new Promise<void>((resolve, reject) => this.server.close(error => error ? reject(error) : resolve()));
     await Promise.allSettled([...this.queues.values()]);
@@ -101,6 +118,11 @@ export class Application {
     if (!token) fail('UNAUTHENTICATED', 'Sign in required', 401);
     const row = this.store.one<SessionRow>('SELECT id,account_id,kind,expires_at FROM sessions WHERE token_hash=? AND revoked_at IS NULL AND expires_at>?', hash(token), this.config.now());
     if (!row || row.kind !== kind) fail('UNAUTHENTICATED', 'Session expired or revoked', 401);
+    return { accountId: row.account_id, sessionId: row.id, kind: row.kind };
+  }
+  private authority(authority: AutoplayAuthority): Identity {
+    const row = this.store.one<SessionRow>('SELECT id,account_id,kind,expires_at FROM sessions WHERE id=? AND account_id=? AND revoked_at IS NULL AND expires_at>?', authority.sessionId, authority.accountId, this.config.now());
+    if (!row) fail('UNAUTHENTICATED', 'Session expired or revoked', 401);
     return { accountId: row.account_id, sessionId: row.id, kind: row.kind };
   }
   private webOnly(identity: Identity): void { if (identity.kind !== 'web') fail('FORBIDDEN', 'A web session is required for this operation', 403); }
@@ -154,7 +176,7 @@ export class Application {
     const requestId = text(body.requestId, 'requestId', 128);
     const bodyHash = operation === 'inventory'
       ? createHmac('sha256', this.config.inventoryKey!).update('request:').update(canonical(body)).digest('hex')
-      : hash(canonical(body));
+      : operation.startsWith('llm_') ? this.provider.fingerprint(body) : hash(canonical(body));
     const row = this.store.one<{ body_hash: string; result_json: string }>('SELECT body_hash,result_json FROM requests WHERE account_id=? AND operation=? AND resource_id=? AND request_id=?', accountId, operation, resourceId, requestId);
     if (row && row.body_hash !== bodyHash) fail('REQUEST_ID_CONFLICT', 'requestId was already used with a different payload', 409);
     return { requestId, bodyHash, prior: row ? object(JSON.parse(row.result_json)) : null };
@@ -185,6 +207,7 @@ export class Application {
       this.store.run('INSERT INTO room_events VALUES(?,?,?,?,?)', row.id, row.event_cursor + 2 + index, version, 'hand_settled', JSON.stringify(summary));
       this.store.run('UPDATE hand_settlements SET published=1 WHERE room_id=? AND hand_id=?', row.id, record.hand_id);
     });
+    queueMicrotask(() => { if (!this.closing) this.autoplay.roomChanged(row.id); });
     return this.room(row.id);
   }
   private version(body: Record<string, unknown>, row: RoomRow): void {
@@ -226,8 +249,10 @@ export class Application {
     }
     return current;
   }
-  private async roomMutation(identity: Identity, id: string, operation: string, body: Record<string, unknown>): Promise<RoomMutationResult> {
+  private async roomMutation(identity: Identity, id: string, operation: string, body: Record<string, unknown>, guard?: () => boolean): Promise<RoomMutationResult> {
     return this.queue(id, () => {
+      if (guard && !guard()) throw new AutoplayFault('STALE_STATE');
+      this.authority(identity);
       const now = this.config.now();
       const preflight = this.request(identity.accountId, operation, id, body);
       // Successful dedup wins first. For a new command, commit the autonomous
@@ -317,6 +342,49 @@ export class Application {
       await this.queue(row.id, () => this.expireRoom(row.id, this.config.now()));
     }
   }
+  private async control(identity: Identity, id: string, operation: 'start' | 'stop', body: Record<string, unknown>) {
+    exactKeys(body, ['requestId']); text(body.requestId, 'requestId', 128);
+    const snapshot = this.snapshot(this.room(id), identity);
+    if (operation === 'start' && snapshot.you.seat === null) fail('FORBIDDEN', 'Own seat required', 403);
+    // Stop cancels before waiting for the room queue; queued submissions also
+    // check their generation guard inside that queue.
+    const preflight = this.request(identity.accountId, `autoplay_${operation}`, id, body);
+    if (operation === 'stop' && !preflight.prior) this.autoplay.stop(identity.accountId, id);
+    return this.queue(id, () => {
+      this.authority(identity);
+      const request = this.request(identity.accountId, `autoplay_${operation}`, id, body);
+      if (request.prior) return { autoplay: this.autoplay.view(identity.accountId, id), replayed: true };
+      const previous = this.autoplay.view(identity.accountId, id);
+      const alreadyEnabled = previous.phase === 'waiting' || previous.phase === 'thinking';
+      let autoplay;
+      try { autoplay = operation === 'start' ? this.autoplay.start(identity, this.snapshot(this.room(id), identity)) : this.autoplay.stop(identity.accountId, id); }
+      catch (error) { if (error instanceof AutoplayFault) fail('ILLEGAL_ACTION', `Autoplay unavailable: ${error.reason}`, 409); throw error; }
+      try { this.store.transaction(() => this.recordRequest(identity.accountId, `autoplay_${operation}`, id, request.requestId, request.bodyHash, { accepted: true })); }
+      catch (error) {
+        // start schedules work only in a microtask. Cancel a newly enabled run
+        // before it can dispatch if durable acceptance fails; keep existing runs.
+        if (operation === 'start' && !alreadyEnabled) this.autoplay.stop(identity.accountId, id);
+        throw error;
+      }
+      return { autoplay, replayed: false };
+    });
+  }
+  private async testModel(identity: Identity, body: Record<string, unknown>): Promise<LlmTestResult> {
+    this.webOnly(identity); exactKeys(body, ['requestId']);
+    const requestId = text(body.requestId, 'requestId', 128); const bodyHash = this.provider.fingerprint(body);
+    const prior = this.store.one<{ body_hash: string; result_json: string }>('SELECT * FROM llm_tests WHERE account_id=? AND request_id=?', identity.accountId, requestId);
+    if (prior) { if (prior.body_hash !== bodyHash) fail('REQUEST_ID_CONFLICT', 'requestId payload conflict', 409); return JSON.parse(prior.result_json) as LlmTestResult; }
+    if (!this.provider.view(identity.accountId).ready) fail('INVALID_INPUT', 'Save a ready model configuration first');
+    this.store.transaction(() => this.store.run('INSERT INTO llm_tests VALUES(?,?,?,?,?)', identity.accountId, requestId, bodyHash, JSON.stringify({ status: 'pending', reason: null }), this.config.now()));
+    const abort = new AbortController(); this.modelTests.add(abort);
+    let result: LlmTestResult;
+    try { await this.provider.test(identity.accountId, abort.signal); result = { status: 'passed', reason: 'OK' }; }
+    catch (error) { result = { status: 'failed', reason: error instanceof ProviderError ? error.reason : 'MODEL_ERROR' }; }
+    finally { this.modelTests.delete(abort); }
+    if (this.closing) return { status: 'interrupted', reason: 'SERVER_RESTART' };
+    this.store.run('UPDATE llm_tests SET result_json=? WHERE account_id=? AND request_id=?', JSON.stringify(result), identity.accountId, requestId);
+    return result;
+  }
   private rewardMode(sandbox: number | boolean): void {
     if (!this.config.inventoryKey) fail('REWARDS_DISABLED', 'Inventory encryption is not configured', 503);
     if (!sandbox && !this.config.realRewardsEnabled) fail('REWARDS_DISABLED', 'Real rewards are disabled', 503);
@@ -395,7 +463,7 @@ export class Application {
       const method = req.method ?? 'GET';
       const mutation = ['POST', 'DELETE', 'PUT', 'PATCH'].includes(method);
       if (mutation) this.origin(req, req.headers.authorization === undefined);
-      const body = mutation && method !== 'DELETE' ? await readJson(req) : {};
+      const body = mutation && (method !== 'DELETE' || path === '/api/llm/config') ? await readJson(req) : {};
       let data: unknown;
       if (method === 'GET' && path === '/api/health') data = { status: 'ok', sandbox: true, inventoryConfigured: Boolean(this.config.inventoryKey), realRewardsEnabled: this.config.realRewardsEnabled };
       else if (method === 'POST' && (path === '/api/auth/register' || path === '/api/auth/login')) {
@@ -437,6 +505,7 @@ export class Application {
         else if (method === 'POST' && path === '/api/auth/logout') {
           exactKeys(body, []);
           this.store.run('UPDATE sessions SET revoked_at=? WHERE id=?', this.config.now(), identity.sessionId);
+          this.autoplay.pauseCredential(identity.sessionId);
           this.cookie(res, '', 0); data = { loggedOut: true };
         } else if (method === 'POST' && path === '/api/auth/tokens') {
           exactKeys(body, ['label']);
@@ -446,8 +515,26 @@ export class Application {
           const id = path.slice('/api/auth/tokens/'.length);
           const changed = this.store.run('UPDATE sessions SET revoked_at=? WHERE id=? AND account_id=? AND kind=? AND revoked_at IS NULL', this.config.now(), id, identity.accountId, 'game');
           if (!Number(changed.changes)) fail('NOT_FOUND', 'Token not found', 404);
+          this.autoplay.pauseCredential(id);
           data = { revoked: true };
-        } else if (method === 'GET' && path === '/api/points') data = { account: this.account(identity.accountId), entries: this.store.all<{ id: string; delta: number; held_delta: number; reason: string; created_at: number }>('SELECT * FROM ledger WHERE account_id=? ORDER BY rowid DESC LIMIT 200', identity.accountId).map((row): PointsEntry => ({ id: row.id, delta: row.delta, heldDelta: row.held_delta, reason: row.reason, createdAt: row.created_at })) };
+        } else if (path === '/api/llm/config') {
+          if (method === 'GET') data = this.provider.view(identity.accountId);
+          else if (method === 'PUT' || method === 'DELETE') {
+            this.webOnly(identity);
+            exactKeys(body, method === 'PUT' ? ['requestId', 'config'] : ['requestId']);
+            const config = method === 'PUT' ? validateConfig(body.config) : null;
+            data = this.store.transaction(() => {
+              const request = this.request(identity.accountId, `llm_${method}`, 'config', body);
+              if (!request.prior) {
+                if (config) this.provider.save(identity.accountId, config); else this.provider.delete(identity.accountId);
+                this.autoplay.pauseAccount(identity.accountId, 'CONFIG_CHANGED');
+                this.recordRequest(identity.accountId, `llm_${method}`, 'config', request.requestId, request.bodyHash, { accepted: true });
+              }
+              return this.provider.view(identity.accountId);
+            });
+          } else fail('NOT_FOUND', 'Endpoint not found', 404);
+        } else if (method === 'POST' && path === '/api/llm/test') data = await this.testModel(identity, body);
+        else if (method === 'GET' && path === '/api/points') data = { account: this.account(identity.accountId), entries: this.store.all<{ id: string; delta: number; held_delta: number; reason: string; created_at: number }>('SELECT * FROM ledger WHERE account_id=? ORDER BY rowid DESC LIMIT 200', identity.accountId).map((row): PointsEntry => ({ id: row.id, delta: row.delta, heldDelta: row.held_delta, reason: row.reason, createdAt: row.created_at })) };
         else if (method === 'GET' && path === '/api/rooms') data = this.store.all<RoomRow>('SELECT * FROM rooms ORDER BY updated_at DESC').map(row => { const state = this.engine(row); const game = getPublicState(state); return { id: row.id, name: row.name, gameId: state.config.gameId, occupiedSeats: game.seats.length, maxSeats: state.config.maxSeats, phase: game.phase }; });
         else if (method === 'POST' && path === '/api/rooms') data = this.store.transaction(() => {
           exactKeys(body, ['name', 'config', 'requestId']);
@@ -461,10 +548,16 @@ export class Application {
           return { snapshot: this.snapshot(this.room(id), identity), replayed: false };
         });
         else if (path.startsWith('/api/rooms/')) {
-          const match = /^\/api\/rooms\/([^/]+)(?:\/(join|leave|start|actions|events))?$/u.exec(path);
+          const match = /^\/api\/rooms\/([^/]+)(?:\/(join|leave|start|actions|events|autoplay)(?:\/(start|stop))?)?$/u.exec(path);
           if (!match) fail('NOT_FOUND', 'Endpoint not found', 404);
           const id = match[1]!; const operation = match[2];
-          if (method === 'GET' && !operation) data = this.snapshot(this.room(id), identity);
+          if (operation === 'autoplay') {
+            this.room(id);
+            if (method === 'GET' && !match[3]) data = this.autoplay.view(identity.accountId, id);
+            else if (method === 'POST' && (match[3] === 'start' || match[3] === 'stop')) data = await this.control(identity, id, match[3], body);
+            else fail('NOT_FOUND', 'Endpoint not found', 404);
+          } else if (match[3]) fail('NOT_FOUND', 'Endpoint not found', 404);
+          else if (method === 'GET' && !operation) data = this.snapshot(this.room(id), identity);
           else if (method === 'GET' && operation === 'events') {
             const row = this.room(id);
             const raw = new URL(req.url!, 'http://localhost').searchParams.get('after');
@@ -472,7 +565,14 @@ export class Application {
             const reset = after > row.event_cursor;
             const events = this.store.all<{ cursor: number; state_version: number; type: string; public_payload_json: string }>('SELECT * FROM room_events WHERE room_id=? AND cursor>? ORDER BY cursor LIMIT 200', id, reset ? 0 : after).map(event => ({ cursor: event.cursor, stateVersion: event.state_version, type: event.type, payload: JSON.parse(event.public_payload_json) as Json }));
             data = { events, snapshot: this.snapshot(row, identity), reset };
-          } else if (method === 'POST' && operation && operation !== 'events') data = await this.roomMutation(identity, id, operation === 'actions' ? 'action' : operation, body);
+          } else if (method === 'POST' && operation && operation !== 'events') {
+            if (operation === 'actions' || operation === 'leave') {
+              const snapshot = this.snapshot(this.room(id), identity);
+              if (snapshot.you.seat === null) fail('FORBIDDEN', 'Own seat required', 403);
+              this.autoplay.stop(identity.accountId, id, operation === 'actions' ? 'MANUAL_TAKEOVER' : 'ABANDONED');
+            }
+            data = await this.roomMutation(identity, id, operation === 'actions' ? 'action' : operation, body);
+          }
           else fail('NOT_FOUND', 'Endpoint not found', 404);
         } else if (method === 'GET' && path === '/api/rewards/products') data = this.store.all<ProductRow>('SELECT * FROM products WHERE enabled=1').filter(product => product.sandbox || this.config.realRewardsEnabled).map((row): RewardProduct => ({ id: row.id, name: row.name, pointsCost: row.points_cost, sandbox: Boolean(row.sandbox), available: this.store.one<{ n: number }>('SELECT COUNT(*) n FROM inventory WHERE product_id=? AND status=?', row.id, 'available')!.n }));
         else if (method === 'POST' && path === '/api/rewards/redemptions') data = this.redeem(identity, body);
