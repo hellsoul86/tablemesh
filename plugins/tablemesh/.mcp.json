@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tablemesh": {
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/launch.mjs"]
+    }
+  }
+}

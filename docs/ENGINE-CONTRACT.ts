@@ -12,10 +12,11 @@ export type Json = null | boolean | number | string | Json[] | { [key: string]: 
 export type GameId = 'holdem' | 'tractor' | 'mahjong';
 export type ErrorCode = 'UNAUTHENTICATED' | 'FORBIDDEN' | 'NOT_FOUND' | 'INVALID_INPUT'
  | 'VERSION_CONFLICT' | 'REQUEST_ID_CONFLICT' | 'ILLEGAL_ACTION' | 'ROOM_FULL'
- | 'INSUFFICIENT_POINTS' | 'OUT_OF_STOCK' | 'REWARDS_DISABLED' | 'RATE_LIMITED' | 'INTERNAL';
+ | 'MATCH_COOLDOWN' | 'INSUFFICIENT_POINTS' | 'OUT_OF_STOCK' | 'REWARDS_DISABLED' | 'RATE_LIMITED' | 'INTERNAL';
 export interface ApiError { code: ErrorCode; message: string; currentStateVersion?: number }
 export type ApiResult<T> = { ok: true; data: T } | { ok: false; error: ApiError };
-export interface AccountView { id: AccountId; displayName: string; points: number; heldPoints: number }
+export interface AccountView { id: AccountId; displayName: string; points: number; heldPoints: number;
+ fairPlay: { reputation: number; cooldownUntil: number; abandonCount: number } }
 export interface SessionView { account: AccountView; expiresAt: number }
 export interface MutationMeta { requestId: string; stateVersion: number }
 export interface SeatIdentity { seat: SeatIndex; accountId: AccountId; displayName: string; teamId?: string }
@@ -55,7 +56,7 @@ export interface HoldemPublicState {
 }
 export interface HoldemPrivateState { holeCards: Card[] }
 export interface RoomSnapshot {
- id: RoomId; name: string; ownerAccountId: AccountId;
+ id: RoomId; name: string; ownerAccountId: AccountId; abandonedAccountIds: AccountId[];
  stateVersion: number; eventCursor: number; config: HoldemConfig;
  game: HoldemPublicState; you: { accountId: AccountId; seat: SeatIndex | null;
  privateState: HoldemPrivateState | null; legalActions: LegalAction[] };

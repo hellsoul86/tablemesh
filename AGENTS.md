@@ -15,9 +15,15 @@ Texas Hold'em with an independent sandbox rewards site.
 
 ## Commands
 
-The workspace scaffold is not present in the seed commit. Verified installation,
-typecheck, test, build, and development commands are TBD and must be added after
-they exist and pass. Target Node >=22.13; exercise Node 22 and 24 in CI.
+- `install`: npm ci (lockfile); worker installation used npm install.
+- `check`: npm run check (typecheck, core/server tests, all builds).
+- `test`: npm test; scoped server: npm run test --workspace @tablemesh/server.
+- `build`: npm run build.
+- `dev`: npm run dev (API 4100; player 5173; rewards 5174, loopback).
+- `plugin check`: npm run plugin:check (actual stdio launcher/SDK).
+- `browser acceptance`: npm run test:e2e.
+- Runtime target: Node >=22.13; CI exercises Node 22 and 24. Command existence is
+  verified; final aggregate results are reported separately from scoped results.
 
 ## Boundaries
 
@@ -39,3 +45,6 @@ they exist and pass. Target Node >=22.13; exercise Node 22 and 24 in CI.
   of public commits. Use example values in configuration templates.
 - Close roadmap issues only with exact checks and runtime evidence. Local tests,
   CI, host installation, deployment, and directory approval are distinct claims.
+- Active-hand participants stay locked. Explicit confirmAbandon applies persisted
+  reputation/cooldown once per account/room/hand; disconnect never confirms it.
+  All-in settlement rights remain, and no platform points are penalized.

@@ -1,0 +1,7 @@
+{
+  "name": "tablemesh",
+  "version": "0.1.0",
+  "description": "Shared free practice Hold’em rooms for authenticated accounts.",
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json"
+}

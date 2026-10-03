@@ -1,0 +1,23 @@
+{
+  "name": "tablemesh",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "workspaces": ["packages/*"],
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "build": "npm run build --workspace @tablemesh/core && npm run build --workspace @tablemesh/server && npm run build --workspace @tablemesh/web && npm run build --workspace @tablemesh/rewards-web",
+    "typecheck": "npm run build --workspace @tablemesh/core && npm run typecheck --workspaces",
+    "test": "npm run test --workspace @tablemesh/core && npm run test --workspace @tablemesh/server",
+    "check": "npm run typecheck && npm test && npm run build",
+    "test:e2e": "npm run build && playwright test --config tests/browser/playwright.config.ts",
+    "dev": "node --env-file-if-exists=.env scripts/dev.mjs",
+    "plugin:check": "node scripts/check-plugin.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0",
+    "@types/node": "22.20.5",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3"
+  }
+}

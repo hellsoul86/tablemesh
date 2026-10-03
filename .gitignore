@@ -17,4 +17,9 @@ coverage/
 /artifacts/
 /test-results/
 /playwright-report/
+/playwright/.auth/
+/.sessions/
+/sessions/
+*.session
+*.session.json
 *.log
