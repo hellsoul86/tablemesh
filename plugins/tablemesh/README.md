@@ -42,3 +42,5 @@ tool_timeout_sec = 45
 参考：[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)、[MCP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)、[OpenAI 插件包说明](https://developers.openai.com/plugins/build/plugins)。
 
 构建后可运行 `node scripts/check-codex-host.mjs` 复现真实宿主检查。它要求 PATH 中已有 Codex CLI（已验证 0.158.0），只用临时线程和运行时配置，不安装客户端、不改全局配置、不启动模型回合。证据默认保存在临时目录，也可用 `TABLEMESH_HOST_CHECK_EVIDENCE_DIR` 指定测试目录。缺少 CLI 或协议方法不兼容会明确失败。
+
+宿主检查只在测试进程中禁用已安装插件及已知的 `node_repl`/`playwright` 配置，断言唯一运行且有工具的 MCP 服务为 Tokem；其他条目必须明确 disabled 且没有工具。用户配置不被修改。若还有其他启用服务，检查会失败，不自动禁用未知服务。

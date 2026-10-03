@@ -17,7 +17,7 @@ await mkdir(evidenceDir, { recursive: true });
 // This fixture uses isolated memory SQLite and synthetic accounts/credentials.
 // Never start a model turn: calls go through the actual host's MCP API directly.
 const f = await fixture({ host: '127.0.0.1', mcpPublicUrl: null, secureCookies: false, now: Date.now });
-const evidence = { version, node: process.version, ephemeral: false, toolCount: 0, calls: [], modelTurns: 0, paidModelCalls: 0, configuration: 'runtime -c only; ephemeral credential store; environment whitelist; no HOME/CODEX_HOME override', result: 'FAIL' };
+const evidence = { version, node: process.version, ephemeral: false, toolCount: 0, calls: [], modelTurns: 0, paidModelCalls: 0, configuration: 'runtime -c only; plugins disabled; known node_repl/playwright disabled; ephemeral credential store; environment whitelist; no HOME/CODEX_HOME override', result: 'FAIL' };
 let child;
 const testSecrets = [];
 let output = '';
@@ -46,6 +46,12 @@ try {
     'check_for_update_on_startup=false',
     'analytics.enabled=false',
     'features.apps=false',
+    'features.plugins=false',
+    // TOML layers merge maps: empty mcp_servers/plugins do not erase inherited entries.
+    // Disable only these known inherited servers for this test process; unknown
+    // active servers must still fail the inventory assertion below.
+    'mcp_servers.node_repl.enabled=false',
+    'mcp_servers.playwright.enabled=false',
     'plugins={}',
   ];
   child = spawn('codex', ['app-server', '--stdio', ...opts.flatMap(v => ['-c', v])], {
@@ -79,7 +85,15 @@ try {
   const inventory = await rpc('mcpServerStatus/list', { threadId, detail: 'toolsAndAuthOnly', limit: 100 }, 20000);
   const server = inventory.data.find(s => s.name === 'tablemesh');
   assert.ok(server, 'Tokem missing from real host inventory');
-  assert.deepEqual(inventory.data.map(s => s.name), ['tablemesh'], 'Runtime config must enable only Tokem');
+  const activeServers = inventory.data.filter(s => s.runtimeStatus !== 'disabled');
+  assert.deepEqual(activeServers.map(s => s.name), ['tablemesh'], 'Runtime config must enable only Tokem');
+  for (const entry of inventory.data.filter(s => s.name !== 'tablemesh')) {
+    assert.equal(entry.runtimeStatus, 'disabled', 'Every other server must be explicitly disabled');
+    assert.equal(Object.keys(entry.tools).length, 0, 'Disabled servers must expose no tools');
+  }
+  assert.equal(server.runtimeStatus, 'connected', 'Tokem must be connected in the actual host');
+  evidence.activeServers = activeServers.map(s => s.name);
+  evidence.disabledServers = inventory.data.filter(s => s.name !== 'tablemesh').map(s => s.name);
   evidence.toolCount = Object.keys(server.tools).length;
   assert.equal(evidence.toolCount, 11);
   const call = async (tool, args = {}) => {
