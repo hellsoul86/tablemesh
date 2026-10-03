@@ -36,7 +36,7 @@ try {
   client = new Client({ name: 'tablemesh-plugin-check', version: '0.1.0' });
   await client.connect(transport);
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 10);
+  assert.equal(tools.tools.length, 11);
   assert.equal(tools.tools.some(tool => /reward|secret|admin|inventory/i.test(tool.name)), false);
   for (const tool of tools.tools) assert.equal(tool.annotations?.idempotentHint, true);
   const call = async (name, arguments_ = {}) => {
@@ -52,6 +52,11 @@ try {
   const lobby = await call('tablemesh_lobby');
   assert.equal(lobby.data.some(item => item.id === room.id), true);
   let snapshot = (await call('tablemesh_observe', { roomId: room.id })).data;
+  const waited = await call('tablemesh_wait_for_turn', { roomId: room.id, afterStateVersion: snapshot.stateVersion, maxWaitMs: 0 });
+  assert.equal(waited.ok, true);
+  assert.equal(waited.data.snapshot.stateVersion, snapshot.stateVersion);
+  assert.equal(waited.data.reason, snapshot.you.legalActions.length ? 'your_turn' : 'timeout');
+  assert.match(client.getInstructions(), /current legalActions/);
   const bCards = (await room.b.request(`/rooms/${room.id}`)).body.data.you.privateState.holeCards;
   for (const card of bCards) assert.equal(JSON.stringify(snapshot).includes(`"${card}"`), false);
   let toolMoves = 0;
@@ -85,7 +90,7 @@ try {
   assert.equal(points.data.account.points, 1000);
   assert.equal(JSON.stringify(points).includes('code_ciphertext'), false);
   assert.equal(stderr.includes(minted.body.data.token), false);
-  console.log(`Tokem plugin check: PASS (launcher spawned, 10 tools, ${toolMoves} game actions, explicit abandonment guard; host installation unverified).`);
+  console.log(`Tokem plugin check: PASS (launcher spawned, 11 tools, ${toolMoves} game actions, explicit abandonment guard; host installation unverified).`);
 } finally {
   await client?.close();
   await f.close();

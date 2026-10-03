@@ -5,4 +5,4 @@ command = "node"
 args = ["/REPLACE_WITH_CHECKOUT/plugins/tablemesh/launch.mjs"]
 env_vars = ["TABLEMESH_TOKEN", "TABLEMESH_URL", "TABLEMESH_REPO_ROOT"]
 startup_timeout_sec = 15
-tool_timeout_sec = 15
+tool_timeout_sec = 45

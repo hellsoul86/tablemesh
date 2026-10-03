@@ -8,7 +8,11 @@ Web clients use an HttpOnly cookie; MCP uses a separately issued game bearer tok
 
 The API binds to loopback by default. Both Vite apps proxy `/api` and use the same hostname with `credentials:include`. Refresh restores the cookie session through GET /account; an expired session returns to sign-in. Reconnect keeps the existing seat, cards and deadline. Cookie attributes are HttpOnly, SameSite=Strict and Path=/, with Secure for HTTPS. Cookie mutations require an exact allowed Origin; requests without Origin require bearer authentication. Live hosting needs HTTPS and deployment-specific credential controls.
 
-The stdio adapter reads `TABLEMESH_TOKEN` and `TABLEMESH_URL` from its environment. It accepts loopback HTTP or HTTPS, rejects URL credentials/query/hash and redirects, and limits HTTP request time. Stdout carries MCP protocol, with diagnostics on stderr. Transport/session IDs do not grant account authority. Public Streamable HTTP and OAuth are not implemented.
+The stdio adapter reads `TABLEMESH_TOKEN` and `TABLEMESH_URL` from its environment. It accepts loopback HTTP or HTTPS, rejects URL credentials/query/hash and redirects, and limits HTTP request time. Stdout carries MCP protocol, with diagnostics on stderr. Transport/session IDs do not grant account authority. `/mcp` uses stateless Streamable HTTP and accepts game bearer credentials only; cookie-only access is rejected. The outer request validates Host and any supplied Origin, then each tool uses a fixed internal listener URL to pass the same bearer through the authoritative API. The target cannot be chosen by tool arguments; redirects are rejected. Initialization does not cache account authority, and expiry/revocation is checked again on calls and throughout waits. HTTP request bodies are bounded to 64 KiB. Public HTTPS deployment and OAuth discovery/login are not implemented.
+
+The read-only wait tool has a 25-second maximum, two concurrent waits per account and 100 per process. Waiting holds no room queue/SQLite transaction, so other players and deadline processing continue. Cancel/disconnect releases wait resources without an abandonment mutation. HTTP cancellation correlates only active waits using account, credential ID and typed JSON-RPC request ID; another credential cannot cancel them, and an active ID cannot overwrite its existing entry. The map is cleared on completion/disconnect/shutdown. It cannot cancel accepted actions or change seat authority; separate clients should mint separate game tokens. The response always uses the same viewer projection as ordinary observation. Agents compute strategy on their own clients; Tokem receives no model credentials.
+
+Connection metadata uses explicit TABLEMESH_MCP_PUBLIC_URL or an actual loopback listener address, not untrusted forwarding or browser headers. It returns no token. UI templates contain environment-variable references or placeholders; the real token is only exposed once by the existing mint route. A loopback URL is only usable from the client's own execution machine. Public exposure still requires deployment-specific HTTPS and credential controls; static-token manual setup is not an OAuth implementation.
 
 ## Cards, seats and history
 
@@ -45,7 +49,8 @@ Redemption assigns stock and records reserve/capture entries in one BEGIN IMMEDI
 5. Starter grants and redemption ledger entries are unique. Final-stock races fulfill one order; a losing or unaffordable request does not debit or consume stock.
 6. Owner-only code reveal, missing-key behavior, encrypted storage and secret-free list/tool/log output are checked.
 7. Two separate browser accounts play against the service. Refresh restores the session, and a stale action requires a fresh decision.
-8. Abandonment confirmation, one-time persistent punishment, cooldown, passive network recovery and all-in rights are checked independently of normal timeouts.
+8. HTTP/stdio share the same tools and seat authority. Cookie-only MCP, invalid Origin/Host, revoked tokens and forged action identity are rejected. Bounded waits cancel without mutation and cannot block deadline processing.
+9. Abandonment confirmation, one-time persistent punishment, cooldown, passive network recovery and all-in rights are checked independently of normal timeouts.
 
 ## References
 
