@@ -1,10 +1,12 @@
 import { getPublicState, getPrivateState } from '@tablemesh/core';
 import type { EngineTransition, HoldemEngineState, HoldemAction, HandReplayFrame, HandReplaySummary,
-  HandReplayList, HandReplayDetail, ReplayParticipant, HandSettlement } from '@tablemesh/core/contracts';
+  HandReplayList, HandReplayDetail, ReplayParticipant, HandSettlement, RoundActionState, SeatActionDetail } from '@tablemesh/core/contracts';
 import type { Store } from './db.js';
+import { projectedFrame } from './round-actions.js';
 import { fail } from './util.js';
 
 export interface ReplayCapture {
+ roundActions?: RoundActionState; actionDetail?: SeatActionDetail | null;
  kind: HandReplayFrame['kind']; at: number; actorSeat?: number;
  before?: HoldemEngineState;
 }
@@ -61,7 +63,7 @@ export class ReplayHistory {
   const payload = actionEvent?.payload as {seat:number;action:HoldemAction['type'];amount?:number} | undefined;
   const action: HoldemAction | null = payload ? payload.action === 'raise' ? {type:'raise',amount:payload.amount!} : {type:payload.action} : null;
   const streets: HandReplayFrame['streets'] = transition.events.filter(e => e.type === 'street_changed' && e.audience === 'public').map(e => e.payload as HandReplayFrame['streets'][number]);
-  const frame: HandReplayFrame = {index:row.step_count,at:capture.at,kind:capture.kind,actorSeat:payload?.seat ?? capture.actorSeat ?? null,action,game,streets};
+  const frame: HandReplayFrame = {index:row.step_count,at:capture.at,kind:capture.kind,actorSeat:payload?.seat ?? capture.actorSeat ?? null,action,game,streets,roundActions:capture.roundActions,actionDetail:capture.actionDetail};
   this.store.run('INSERT INTO hand_replay_frames VALUES(?,?,?)',handId,row.step_count,JSON.stringify(frame));
   this.store.run('UPDATE hand_replays SET step_count=step_count+1 WHERE hand_id=?',handId);
   if (transition.settlement) {
@@ -70,8 +72,8 @@ export class ReplayHistory {
    this.store.run('UPDATE hand_replays SET finished_at=?,participants_json=?,settlement_json=?,sequence=? WHERE hand_id=?',capture.at,JSON.stringify(participants),JSON.stringify(transition.settlement),this.nextSequence(),handId);
   }
  }
- abandon(roomId: string, state: HoldemEngineState, actorSeat: number, at: number): void {
-  this.capture(roomId,{state,events:[],settlement:null},{kind:'abandon',actorSeat,at});
+ abandon(roomId: string, state: HoldemEngineState, actorSeat: number, at: number, roundActions?: RoundActionState): void {
+  this.capture(roomId,{state,events:[],settlement:null},{kind:'abandon',actorSeat,at,roundActions,actionDetail:null});
  }
  private summary(row: ReplayRow, accountId: string): HandReplaySummary {
   const participants: ReplayParticipant[] = JSON.parse(row.participants_json);
@@ -90,7 +92,20 @@ export class ReplayHistory {
   const row=this.store.one<ReplayRow & {seat:number;own_cards_json:string|null}>('SELECT h.*,p.seat,p.own_cards_json FROM hand_replays h JOIN hand_replay_players p ON p.hand_id=h.hand_id WHERE h.hand_id=? AND p.account_id=? AND h.finished_at IS NOT NULL',handId,accountId);
   if (!row) fail('NOT_FOUND','Completed participating hand not found',404);
   const frames=this.store.all<{frame_json:string}>('SELECT frame_json FROM hand_replay_frames WHERE hand_id=? AND step_index>? ORDER BY step_index LIMIT ?',handId,afterStep,limit+1).map(frame=>JSON.parse(frame.frame_json) as HandReplayFrame);
-  const more=frames.length>limit;const page=frames.slice(0,limit);
+  const more=frames.length>limit;let page=frames.slice(0,limit);
+  if(page.some(frame=>frame.roundActions===undefined)) {
+   // Stream only the historical prefix needed for this page; never persist
+   // invented metadata or use future frames to explain earlier decisions.
+   const end=page.at(-1)!.index;let before:HandReplayFrame|undefined;const projected:HandReplayFrame[]=[];
+   const config=row.config_json?JSON.parse(row.config_json):null;const participants=JSON.parse(row.participants_json) as ReplayParticipant[];
+   for(const item of this.store.db.prepare('SELECT frame_json FROM hand_replay_frames WHERE hand_id=? AND step_index<=? ORDER BY step_index').iterate(handId,end)) {
+    const original=JSON.parse(item.frame_json as string) as HandReplayFrame;
+    const frame=projectedFrame(original,before?.game,before?.roundActions,config,participants);
+    if(frame.index>afterStep) projected.push(frame);
+    before=frame;
+   }
+   page=projected;
+  }
   return {summary:this.summary(row,accountId),config:row.config_json?JSON.parse(row.config_json):null,
    you:{accountId,seat:row.seat,privateState:row.own_cards_json?{holeCards:JSON.parse(row.own_cards_json)}:null},frames:page,nextAfterStep:more?page.at(-1)!.index:null};
  }

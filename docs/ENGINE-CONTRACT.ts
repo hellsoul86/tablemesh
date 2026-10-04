@@ -54,10 +54,21 @@ export interface HoldemPublicState {
  settlement: HandSettlement | null;
 }
 export interface HoldemPrivateState { holeCards: Card[] }
+export type BettingStreet = 'preflop' | 'flop' | 'turn' | 'river';
+export interface SeatActionDetail {
+ seat: SeatIndex; street: BettingStreet; type: 'check' | 'call' | 'bet' | 'raise' | 'fold';
+ paid: number; committedTo: number; allIn: boolean;
+ source: 'player' | 'timeout' | 'abandon'; at: number;
+}
+export interface SeatRoundStatus {
+ seat: SeatIndex; streetCommitted: number | null; handCommitted: number | null;
+ actionKnown: boolean; lastAction: SeatActionDetail | null;
+}
+export interface RoundActionState { street: BettingStreet | null; seats: SeatRoundStatus[] }
 export interface RoomSnapshot {
  id: RoomId; name: string; ownerAccountId: AccountId; abandonedAccountIds: AccountId[];
  stateVersion: number; eventCursor: number; config: HoldemConfig;
- game: HoldemPublicState; you: { accountId: AccountId; seat: SeatIndex | null;
+ game: HoldemPublicState; roundActions: RoundActionState; you: { accountId: AccountId; seat: SeatIndex | null;
  privateState: HoldemPrivateState | null; legalActions: LegalAction[] };
 }
 export interface RoomSummary { id: RoomId; name: string; gameId: GameId; occupiedSeats: number; maxSeats: number; phase: string }
@@ -79,6 +90,7 @@ export interface HandReplaySummary {
 }
 export interface HandReplayList { hands: HandReplaySummary[]; nextBefore: number | null }
 export interface HandReplayFrame {
+ roundActions?: RoundActionState; actionDetail?: SeatActionDetail | null;
  index: number; at: number;
  kind: 'start' | 'action' | 'timeout' | 'abandon' | 'abandon_fold';
  actorSeat: SeatIndex | null; action: HoldemAction | null;

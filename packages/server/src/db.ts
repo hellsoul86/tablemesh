@@ -42,6 +42,9 @@ export class Store {
         published INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
         PRIMARY KEY(room_id,hand_id)
       );
+      CREATE TABLE IF NOT EXISTS room_round_actions (
+        room_id TEXT PRIMARY KEY REFERENCES rooms(id), hand_id TEXT, state_json TEXT NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS hand_replays (
         hand_id TEXT PRIMARY KEY, sequence INTEGER UNIQUE,
         room_id TEXT NOT NULL REFERENCES rooms(id), room_name TEXT NOT NULL,

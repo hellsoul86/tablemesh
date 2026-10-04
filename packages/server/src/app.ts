@@ -5,6 +5,7 @@ import { createTable, setSeats, startHand, applyAction, applyTimeout, getPublicS
 import type { AccountView, HoldemConfig, HoldemEngineState, EngineResult, RoomSnapshot, RoomMutationResult, RedemptionView, RewardProduct, PointsEntry, ApiResult, Json } from '@tablemesh/core/contracts';
 import { Store } from './db.js';
 import { ReplayHistory, type ReplayCapture } from './replay.js';
+import { RoundActionHistory } from './round-actions.js';
 import { readConfig, mcpPublicUrl, type AppConfig } from './config.js';
 import { handleGameMcp, McpWaitCancellation } from './mcp-http.js';
 import type { GameApi } from './mcp-tools.js';
@@ -43,6 +44,7 @@ export class Application {
   readonly config: AppConfig;
   readonly store: Store;
   private readonly replays: ReplayHistory;
+  private readonly roundActions: RoundActionHistory;
   readonly server;
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly rate = new Map<string, { count: number; until: number }>();
@@ -59,6 +61,7 @@ export class Application {
     setMaxListeners(101, this.shutdown.signal); // At most 100 pending wait listeners.
     this.store = new Store(this.config.databasePath);
     this.replays = new ReplayHistory(this.store);
+    this.roundActions = new RoundActionHistory(this.store);
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.requestTimeout = 15_000;
     this.server.headersTimeout = 10_000;
@@ -272,7 +275,7 @@ export class Application {
     // Explicit DTO assembly: the complete engine record never leaves this service.
     return {
       id: room.id, name: room.name, ownerAccountId: room.owner_account_id,
-      stateVersion: room.state_version, eventCursor: room.event_cursor, config: state.config, game,
+      stateVersion: room.state_version, eventCursor: room.event_cursor, config: state.config, game, roundActions: this.roundActions.view(room.id,game),
       abandonedAccountIds: this.abandoned(state, room.id),
       you: { accountId: identity.accountId, seat, privateState: seat === null ? null : getPrivateState(state, seat), legalActions: seat === null ? [] : getLegalActions(state, seat) }
     };
@@ -298,7 +301,10 @@ export class Application {
       this.store.run('INSERT OR IGNORE INTO hand_settlements(room_id,hand_id,result_json,participants_json,created_at) VALUES(?,?,?,?,?)',
         roomId, result.transition.settlement.handId, JSON.stringify(result.transition.settlement), JSON.stringify(participants), this.config.now());
     }
-    if (result.ok && capture) this.replays.capture(roomId, result.transition, capture);
+    if (result.ok && capture) {
+      if (capture.before) Object.assign(capture,this.roundActions.record(roomId,capture.before,result.transition,capture.kind,capture.at));
+      this.replays.capture(roomId, result.transition, capture);
+    }
     return state;
   }
   private persistRoom(row: RoomRow, state: HoldemEngineState, eventType: string, payload: Json): RoomRow {
@@ -342,7 +348,7 @@ export class Application {
       if (!window || game.phase === 'complete' || now >= window.deadline) break;
       const actor = game.seats.find(seat => seat.seat === game.actorSeat);
       if (!actor || actor.status !== 'active' || !this.abandoned(current, roomId).includes(actor.accountId)) break;
-      current = this.reduce(applyAction(current, { seat: actor.seat, action: { type: 'fold' }, windowId: window.id, now }), roomId, {kind:'abandon_fold',at:now});
+      current = this.reduce(applyAction(current, { seat: actor.seat, action: { type: 'fold' }, windowId: window.id, now }), roomId, {kind:'abandon_fold',at:now,before:current});
     }
     const game = getPublicState(current);
     if (game.phase === 'complete' && game.handId) {
@@ -383,7 +389,7 @@ export class Application {
             this.recordRequest(identity.accountId, operation, id, request.requestId, request.bodyHash, { roomId: id, acceptedStateVersion: row.state_version });
             return { snapshot: this.snapshot(row, identity), replayed: false };
           }
-          this.replays.abandon(id,state,own.seat,now);
+          this.replays.abandon(id,state,own.seat,now,this.roundActions.view(id,current));
           state = this.settleAbandons(state, id, now);
         } else {
         const seats = current.seats.map(({ seat, accountId, displayName }) => ({ seat, accountId, displayName }));
@@ -415,7 +421,7 @@ export class Application {
         exactKeys(action, action.type === 'raise' ? ['type', 'amount'] : ['type']);
         if (!['fold', 'check', 'call', 'raise'].includes(String(action.type))) fail('INVALID_INPUT', 'Invalid action type');
         const validated = action.type === 'raise' ? { type: 'raise' as const, amount: integer(action.amount, 'amount') } : { type: action.type as 'fold' | 'check' | 'call' };
-        state = this.reduce(applyAction(state, { seat: own.seat, action: validated, windowId, now }), id, {kind:'action',at:now});
+        state = this.reduce(applyAction(state, { seat: own.seat, action: validated, windowId, now }), id, {kind:'action',at:now,before:state});
       }
       state = this.settleAbandons(state, id, now);
       const updated = this.persistRoom(row, state, `room_${operation}`, { phase: getPublicState(state).phase, actorSeat: own?.seat ?? null });
@@ -432,7 +438,7 @@ export class Application {
       if (!active || active.deadline > now) return false;
       const requestId = `timeout:${roomId}:${active.id}`;
       if (this.store.one('SELECT request_id FROM requests WHERE account_id=? AND operation=? AND resource_id=? AND request_id=?', 'server', 'timeout', roomId, requestId)) return false;
-      const state = this.settleAbandons(this.reduce(applyTimeout(current, now), roomId, {kind:'timeout',at:now}), roomId, now);
+      const state = this.settleAbandons(this.reduce(applyTimeout(current, now), roomId, {kind:'timeout',at:now,before:current}), roomId, now);
       const updated = this.persistRoom(latest, state, 'room_timeout', { windowId: active.id, phase: getPublicState(state).phase });
       this.recordRequest('server', 'timeout', roomId, requestId, hash(active.id), { acceptedStateVersion: updated.state_version });
       return true;
