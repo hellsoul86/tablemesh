@@ -21,7 +21,7 @@ tool_timeout_sec = 45
 
 ## 本机 stdio 连接
 
-在仓库运行 `npm ci && npm run build`，启动 Tokem API。为插件进程设置 `TABLEMESH_TOKEN` 和 `TABLEMESH_URL`；复制插件到别处时，用 `TABLEMESH_REPO_ROOT` 指向已构建仓库。按 `codex-config.example.toml` 填 launcher 的绝对路径；不必依赖 MCP 参数插值。stdio 与 HTTP 提供相同十一工具，默认插件配置仍是 stdio。
+在仓库运行 `npm ci && npm run build`，启动 Tokem API。为插件进程设置 `TABLEMESH_TOKEN` 和 `TABLEMESH_URL`；复制插件到别处时，用 `TABLEMESH_REPO_ROOT` 指向已构建仓库。按 `codex-config.example.toml` 填 launcher 的绝对路径；不必依赖 MCP 参数插值。stdio 与 HTTP 提供相同十三工具，默认插件配置仍是 stdio。
 
 插件显示名 Tokem。`tablemesh` 插件标识、`tablemesh_*` 工具名和 `TABLEMESH_*` 环境变量保留，已有配置无需改名。
 
@@ -35,9 +35,15 @@ tool_timeout_sec = 45
 
 游戏 token 不访问兑换或运营接口。工具不返回他人私牌、剩余牌堆或卡密。积分与筹码分账，练习输赢不发积分；演示兑换仍在独立网页用网页登录会话操作。
 
+## 复盘已结束牌局
+
+`tablemesh_list_replays` 读取本人参与过的已结束手牌，最新结算在前；按 nextBefore 继续分页。`tablemesh_get_replay {handId,afterStep,limit}` 每页最多 200 步，按 nextAfterStep 继续。原账号退出或换座后仍能读取自己的历史，新占席者没有前任的权限。
+
+每步保留当时公开的牌桌状态和本人原私牌。对手牌仅在当时公开摊牌后显示；全下自动发完并结算可能集中在同一步。旧局没有完整轨迹时只提供结算，未知筹码净变化为 null。历史不会提供下注窗口，也不会改变牌桌、积分或离席处罚。
+
 ## 验证边界
 
-`npm run plugin:check` 从其他目录真实启动 launcher，列出十一工具并完成合法动作和离席确认校验。HTTP SDK 集成检查两个独立账户、鉴权、私牌、版本和有界等待。另以 Codex CLI 0.158.0 的临时 app-server、`ephemeral:true` 线程和运行时配置验证了 HTTP 连接：宿主列出十一工具，并调用账户、观察、等待和合法动作。测试未发起模型回合；它不证明自主策略或任意时长连续运行。插件安装和 MCP 参数 `${PLUGIN_ROOT}` 插值仍须客户端验证，公开目录未提交。
+`npm run plugin:check` 从其他目录真实启动 launcher，列出十三工具并完成合法动作和离席确认校验。HTTP SDK 集成检查两个独立账户、鉴权、私牌、版本和有界等待。另以 Codex CLI 0.158.0 的临时 app-server、`ephemeral:true` 线程和运行时配置验证了 HTTP 连接：宿主列出十三工具，并调用账户、观察、等待、合法动作和本人已结束手牌的历史列表/详情。测试未发起模型回合；它不证明自主策略或任意时长连续运行。插件安装和 MCP 参数 `${PLUGIN_ROOT}` 插值仍须客户端验证，公开目录未提交。
 
 参考：[Codex MCP](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)、[MCP transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)、[OpenAI 插件包说明](https://developers.openai.com/plugins/build/plugins)。
 

@@ -4,6 +4,7 @@ import { randomInt, randomUUID, randomBytes, createCipheriv, createDecipheriv, c
 import { createTable, setSeats, startHand, applyAction, applyTimeout, getPublicState, getPrivateState, getLegalActions } from '@tablemesh/core';
 import type { AccountView, HoldemConfig, HoldemEngineState, EngineResult, RoomSnapshot, RoomMutationResult, RedemptionView, RewardProduct, PointsEntry, ApiResult, Json } from '@tablemesh/core/contracts';
 import { Store } from './db.js';
+import { ReplayHistory, type ReplayCapture } from './replay.js';
 import { readConfig, mcpPublicUrl, type AppConfig } from './config.js';
 import { handleGameMcp, McpWaitCancellation } from './mcp-http.js';
 import type { GameApi } from './mcp-tools.js';
@@ -41,6 +42,7 @@ function gameConfig(value: unknown): HoldemConfig {
 export class Application {
   readonly config: AppConfig;
   readonly store: Store;
+  private readonly replays: ReplayHistory;
   readonly server;
   private readonly queues = new Map<string, Promise<unknown>>();
   private readonly rate = new Map<string, { count: number; until: number }>();
@@ -56,6 +58,7 @@ export class Application {
     this.config.mcpPublicUrl = mcpPublicUrl(this.config.mcpPublicUrl);
     setMaxListeners(101, this.shutdown.signal); // At most 100 pending wait listeners.
     this.store = new Store(this.config.databasePath);
+    this.replays = new ReplayHistory(this.store);
     this.server = createServer((req, res) => { void this.handle(req, res); });
     this.server.requestTimeout = 15_000;
     this.server.headersTimeout = 10_000;
@@ -286,7 +289,7 @@ export class Application {
   private recordRequest(accountId: string, operation: string, resourceId: string, requestId: string, bodyHash: string, result: unknown): void {
     this.store.run('INSERT INTO requests VALUES(?,?,?,?,?,?)', accountId, operation, resourceId, requestId, bodyHash, JSON.stringify(result));
   }
-  private reduce(result: EngineResult, roomId: string): HoldemEngineState {
+  private reduce(result: EngineResult, roomId: string, capture?: ReplayCapture): HoldemEngineState {
     const state = unwrap(result);
     // Only this transition's settlement is accepted; an old public summary is
     // never interpreted as a new payout or result. This runs in the command tx.
@@ -295,6 +298,7 @@ export class Application {
       this.store.run('INSERT OR IGNORE INTO hand_settlements(room_id,hand_id,result_json,participants_json,created_at) VALUES(?,?,?,?,?)',
         roomId, result.transition.settlement.handId, JSON.stringify(result.transition.settlement), JSON.stringify(participants), this.config.now());
     }
+    if (result.ok && capture) this.replays.capture(roomId, result.transition, capture);
     return state;
   }
   private persistRoom(row: RoomRow, state: HoldemEngineState, eventType: string, payload: Json): RoomRow {
@@ -338,7 +342,7 @@ export class Application {
       if (!window || game.phase === 'complete' || now >= window.deadline) break;
       const actor = game.seats.find(seat => seat.seat === game.actorSeat);
       if (!actor || actor.status !== 'active' || !this.abandoned(current, roomId).includes(actor.accountId)) break;
-      current = this.reduce(applyAction(current, { seat: actor.seat, action: { type: 'fold' }, windowId: window.id, now }), roomId);
+      current = this.reduce(applyAction(current, { seat: actor.seat, action: { type: 'fold' }, windowId: window.id, now }), roomId, {kind:'abandon_fold',at:now});
     }
     const game = getPublicState(current);
     if (game.phase === 'complete' && game.handId) {
@@ -379,6 +383,7 @@ export class Application {
             this.recordRequest(identity.accountId, operation, id, request.requestId, request.bodyHash, { roomId: id, acceptedStateVersion: row.state_version });
             return { snapshot: this.snapshot(row, identity), replayed: false };
           }
+          this.replays.abandon(id,state,own.seat,now);
           state = this.settleAbandons(state, id, now);
         } else {
         const seats = current.seats.map(({ seat, accountId, displayName }) => ({ seat, accountId, displayName }));
@@ -399,7 +404,7 @@ export class Application {
         if (row.owner_account_id !== identity.accountId) fail('FORBIDDEN', 'Only the owner can start a hand', 403);
         this.enteringAllowed(identity.accountId);
         for (const seat of current.seats) this.enteringAllowed(seat.accountId);
-        state = this.reduce(startHand(state, { handId: randomUUID(), deck: shuffleDeck(), now }), id);
+        state = this.reduce(startHand(state, { handId: randomUUID(), deck: shuffleDeck(), now }), id, {kind:'start',at:now,before:state});
       } else {
         exactKeys(body, ['stateVersion', 'requestId', 'windowId', 'action']);
         if (!own) fail('FORBIDDEN', 'A seat belonging to this account is required', 403);
@@ -410,7 +415,7 @@ export class Application {
         exactKeys(action, action.type === 'raise' ? ['type', 'amount'] : ['type']);
         if (!['fold', 'check', 'call', 'raise'].includes(String(action.type))) fail('INVALID_INPUT', 'Invalid action type');
         const validated = action.type === 'raise' ? { type: 'raise' as const, amount: integer(action.amount, 'amount') } : { type: action.type as 'fold' | 'check' | 'call' };
-        state = this.reduce(applyAction(state, { seat: own.seat, action: validated, windowId, now }), id);
+        state = this.reduce(applyAction(state, { seat: own.seat, action: validated, windowId, now }), id, {kind:'action',at:now});
       }
       state = this.settleAbandons(state, id, now);
       const updated = this.persistRoom(row, state, `room_${operation}`, { phase: getPublicState(state).phase, actorSeat: own?.seat ?? null });
@@ -427,7 +432,7 @@ export class Application {
       if (!active || active.deadline > now) return false;
       const requestId = `timeout:${roomId}:${active.id}`;
       if (this.store.one('SELECT request_id FROM requests WHERE account_id=? AND operation=? AND resource_id=? AND request_id=?', 'server', 'timeout', roomId, requestId)) return false;
-      const state = this.settleAbandons(this.reduce(applyTimeout(current, now), roomId), roomId, now);
+      const state = this.settleAbandons(this.reduce(applyTimeout(current, now), roomId, {kind:'timeout',at:now}), roomId, now);
       const updated = this.persistRoom(latest, state, 'room_timeout', { windowId: active.id, phase: getPublicState(state).phase });
       this.recordRequest('server', 'timeout', roomId, requestId, hash(active.id), { acceptedStateVersion: updated.state_version });
       return true;
@@ -575,6 +580,14 @@ export class Application {
           if (!Number(changed.changes)) fail('NOT_FOUND', 'Token not found', 404);
           data = { revoked: true };
         } else if (method === 'GET' && path === '/api/points') data = { account: this.account(identity.accountId), entries: this.store.all<{ id: string; delta: number; held_delta: number; reason: string; created_at: number }>('SELECT * FROM ledger WHERE account_id=? ORDER BY rowid DESC LIMIT 200', identity.accountId).map((row): PointsEntry => ({ id: row.id, delta: row.delta, heldDelta: row.held_delta, reason: row.reason, createdAt: row.created_at })) };
+        else if (method === 'GET' && (path === '/api/replays' || path.startsWith('/api/replays/'))) {
+          const query = new URL(req.url!, 'http://localhost').searchParams;
+          const allowed = path === '/api/replays' ? ['before','limit'] : ['afterStep','limit'];
+          for (const key of query.keys()) if (!allowed.includes(key) || query.getAll(key).length !== 1) fail('INVALID_INPUT','Invalid replay query');
+          const limit = query.has('limit') ? integer(Number(query.get('limit')), 'limit',1,path === '/api/replays' ? 50 : 200) : path === '/api/replays' ? 20 : 100;
+          if (path === '/api/replays') data = this.replays.list(identity.accountId,query.has('before') ? integer(Number(query.get('before')),'before',1) : undefined,limit);
+          else data = this.replays.detail(identity.accountId,text(decodeURIComponent(path.slice('/api/replays/'.length)),'handId',128),query.has('afterStep') ? integer(Number(query.get('afterStep')),'afterStep',-1) : -1,limit);
+        }
         else if (method === 'GET' && path === '/api/rooms') data = this.store.all<RoomRow>('SELECT * FROM rooms ORDER BY updated_at DESC').map(row => { const state = this.engine(row); const game = getPublicState(state); return { id: row.id, name: row.name, gameId: state.config.gameId, occupiedSeats: game.seats.length, maxSeats: state.config.maxSeats, phase: game.phase }; });
         else if (method === 'POST' && path === '/api/rooms') data = this.store.transaction(() => {
           exactKeys(body, ['name', 'config', 'requestId']);

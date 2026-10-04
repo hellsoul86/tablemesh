@@ -55,3 +55,11 @@ Redemption assigns stock and records reserve/capture entries in one BEGIN IMMEDI
 ## References
 
 [MCP security](https://modelcontextprotocol.io/docs/2026-07-28/tutorials/security/security_best_practices), [official SDK](https://github.com/modelcontextprotocol/typescript-sdk), [Node crypto](https://nodejs.org/api/crypto.html), [SQLite transactions](https://sqlite.org/lang_transaction.html) and [OpenAI plugin packaging](https://developers.openai.com/plugins/build/plugins) inform the implementation. Tokem's reputation numbers, deadlines and free-practice reward boundaries are application choices.
+
+## Replay privacy and persistence
+
+A replay is authorized against its frozen original account membership, independent of the current room occupant. Unfinished, absent and unrelated hand IDs return the same 404. Web cookies and revocable game bearer tokens use the same permission; no tool/API parameter supplies a replacement account identity. Zero-stack seated observers who were not dealt into a new hand get no replay membership.
+
+Public frames are saved from getPublicState before any post-settlement seat cleanup, with historical windows cleared. Each frame retains only the public reveals that existed at that step. Opponent folded cards never enter frames; later showdown cards are never copied backward. The caller's originally dealt cards are read from a separate account-bound row, not from the room's current seat. Stored frames exclude engine internals/deck. SQLite and backup access still exposes dealt cards to the server operator, as the live recovery snapshot already does; local file protection remains necessary. Replay has no export/share endpoint or anonymity claim.
+
+Metadata, private ownership, frames and completion share the same authoritative mutation transaction. Persistence failure rolls back the action; successful request dedup adds no extra frame. Restart preserves both active captures and immutable completed results. Startup adds tables and backfills known old results only, without reconstructing missing private cards or action states. Trace pagination is bounded at 200 frames and list pages at 50 hands. Replay reads do not trigger an action, timeout, abandonment, wallet debit or reward reveal. The host smoke exercises only synthetic test accounts and performs no model turn.

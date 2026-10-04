@@ -59,7 +59,7 @@ test('two independent HTTP MCP agents and one manual seat complete a hand with p
   const f = await fixture(); t.after(f.close);
   const players = await Promise.all(['甲Agent', '乙Agent', '网页'].map(label => f.register(label)));
   const agents = await Promise.all(players.slice(0, 2).map(player => agent(t, f, player)));
-  assert.equal((await agents[0].client.listTools()).tools.length, 11);
+  assert.equal((await agents[0].client.listTools()).tools.length, 13);
   assert.match(agents[0].client.getInstructions(), /shared|sharing/);
   let result = await agents[0].call('tablemesh_create_room', { name: '用户Agent同桌', config: { ...defaultRoomConfig, maxSeats: 3 }, requestId: randomUUID() });
   assert.equal(result.ok, true);

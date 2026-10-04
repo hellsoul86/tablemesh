@@ -67,6 +67,32 @@ export interface RoomEvent {
  cursor: number; stateVersion: number; type: string; payload: Json;
 } // Only viewer-filtered events. Never broadcast the engine state/event object.
 export interface RoomEventBatch { events: RoomEvent[]; snapshot: RoomSnapshot; reset: boolean }
+export interface ReplayParticipant extends SeatIdentity {
+ startingStack: number | null; finalStack: number | null;
+}
+export interface HandReplaySummary {
+ sequence: number; handId: HandId; roomId: RoomId; roomName: string;
+ startedAt: number | null; finishedAt: number;
+ participants: ReplayParticipant[];
+ availability: 'full' | 'summary_only'; stepCount: number;
+ netChips: number | null; settlement: HandSettlement;
+}
+export interface HandReplayList { hands: HandReplaySummary[]; nextBefore: number | null }
+export interface HandReplayFrame {
+ index: number; at: number;
+ kind: 'start' | 'action' | 'timeout' | 'abandon' | 'abandon_fold';
+ actorSeat: SeatIndex | null; action: HoldemAction | null;
+ // Real post-reduction public state. No usable live action window.
+ game: HoldemPublicState;
+ // Core-issued public board transitions within this same atomic reduction.
+ streets: { phase: 'flop' | 'turn' | 'river'; board: Card[] }[];
+}
+export interface HandReplayDetail {
+ summary: HandReplaySummary; config: HoldemConfig | null;
+ you: { accountId: AccountId; seat: SeatIndex; privateState: HoldemPrivateState | null };
+ frames: HandReplayFrame[]; nextAfterStep: number | null;
+}
+
 export interface PointsEntry { id: string; delta: number; heldDelta: number; reason: string; createdAt: number }
 export interface RewardProduct { id: string; name: string; pointsCost: number; available: number; sandbox: boolean }
 export interface RedemptionView { id: string; productId: string; pointsCost: number;

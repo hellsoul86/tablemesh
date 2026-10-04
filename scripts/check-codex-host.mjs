@@ -95,7 +95,7 @@ try {
   evidence.activeServers = activeServers.map(s => s.name);
   evidence.disabledServers = inventory.data.filter(s => s.name !== 'tablemesh').map(s => s.name);
   evidence.toolCount = Object.keys(server.tools).length;
-  assert.equal(evidence.toolCount, 11);
+  assert.equal(evidence.toolCount, 13);
   const call = async (tool, args = {}) => {
     const result = await rpc('mcpServer/tool/call', { threadId, server: 'tablemesh', tool, arguments: args });
     const content = result.structuredContent ?? result.result?.structuredContent ?? result;
@@ -117,6 +117,16 @@ try {
   assert.ok(move, 'fixture owner must have first heads-up turn');
   const action = await call('tablemesh_act', { roomId: room.id, stateVersion: legal.data.stateVersion, windowId: legal.data.windowId, requestId: randomUUID(), action: { type: move.type } });
   assert.equal(action.ok, true); assert.ok(action.data.snapshot.stateVersion > snapshot.stateVersion); evidence.calls.push('legal-action');
+  const bView = (await room.b.request(`/rooms/${room.id}`)).body.data;
+  const folded = await room.b.request(`/rooms/${room.id}/actions`, { stateVersion:bView.stateVersion, windowId:bView.game.window.id, requestId:randomUUID(), action:{type:'fold'} });
+  assert.equal(folded.body.data.snapshot.game.phase, 'complete');
+  const list = await call('tablemesh_list_replays');
+  assert.equal(list.data.hands[0].handId, snapshot.game.handId); evidence.calls.push('list-own-replays');
+  const replay = await call('tablemesh_get_replay', {handId:snapshot.game.handId});
+  assert.equal(replay.data.summary.availability, 'full');
+  assert.deepEqual(replay.data.you.privateState.holeCards,snapshot.you.privateState.holeCards);
+  assert.equal(replay.data.frames.at(-1).game.phase,'complete');
+  assert.equal(replay.data.frames.every(frame=>frame.game.revealedHands.length===0),true); evidence.calls.push('get-own-replay');
   const threadList = await rpc('thread/list', { cwd: scratch, limit: 100 });
   assert.equal(threadList.data.some(t => t.id === threadId), false); evidence.notPersisted = true;
   assert.equal(stderr.includes(gameToken), false); evidence.noTokenInDiagnostics = true;
@@ -131,11 +141,11 @@ try {
   child?.kill('SIGTERM');
   await f.close();
   evidence.artifactHashes = {};
-  for (const path of ['packages/server/dist/mcp-tools.js', 'packages/server/dist/mcp-http.js', 'packages/server/dist/app.js', 'package-lock.json']) {
+  for (const path of ['packages/server/dist/mcp-tools.js', 'packages/server/dist/mcp-http.js', 'packages/server/dist/app.js', 'packages/server/dist/replay.js', 'package-lock.json']) {
     evidence.artifactHashes[path] = createHash('sha256').update(await readFile(new URL('../' + path, import.meta.url))).digest('hex');
   }
   const evidencePath = join(evidenceDir, 'codex-host.json');
   await writeFile(evidencePath, JSON.stringify(evidence, null, 2) + '\n');
-  if (evidence.result === 'PASS') console.log(`Tokem Codex host: PASS (${version}, ${evidence.toolCount} tools, 1 legal action, ephemeral thread, no model turn). Evidence: ${evidencePath}`);
+  if (evidence.result === 'PASS') console.log(`Tokem Codex host: PASS (${version}, ${evidence.toolCount} tools, 1 legal action, own ended-hand replay, ephemeral thread, no model turn). Evidence: ${evidencePath}`);
   else console.error(`Tokem Codex host: FAIL (${evidence.error}). This check requires app-server ephemeral threads, mcpServerStatus/list and mcpServer/tool/call; verified CLI version: 0.158.0. Evidence: ${evidencePath}`);
 }

@@ -22,7 +22,7 @@ test('网页席位与两个独立 HTTP MCP 协议客户端同局，接入配置�
   for(const page of [one,two]){
    await page.goto('/app/account');await page.getByLabel('用途备注',{exact:true}).fill('本机协议客户端');await page.getByRole('button',{name:'创建游戏令牌',exact:true}).click();await expect(page.locator('#game-token')).toBeVisible();const key=(await page.locator('#game-token').textContent())!;keys.push(key);await page.getByRole('button',{name:'我已保存，隐藏',exact:true}).click();
    await page.getByRole('button',{name:'复制接入配置',exact:true}).click();const copied=await page.evaluate(()=>navigator.clipboard.readText());expect(copied.includes(key)).toBe(false);expect(copied).toContain('bearer_token_env_var = "TABLEMESH_TOKEN"');expect(copied).toContain('http://127.0.0.1:4100/mcp');
-   const client=new Client({name:'tokem-browser-protocol-client',version:'1.0.0'});await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:4100/mcp'),{requestInit:{headers:{Authorization:`Bearer ${key}`}}}));clients.push(client);expect((await client.listTools()).tools).toHaveLength(11);
+   const client=new Client({name:'tokem-browser-protocol-client',version:'1.0.0'});await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:4100/mcp'),{requestInit:{headers:{Authorization:`Bearer ${key}`}}}));clients.push(client);expect((await client.listTools()).tools).toHaveLength(13);
    const web=(await (await page.request.get('/api/account')).json()).data;expect((await invoke(client,'tablemesh_account')).data.id).toBe(web.id);
   }
   // Address discovery failure must leave account/token controls usable and permit explicit recovery.

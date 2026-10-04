@@ -42,6 +42,22 @@ export class Store {
         published INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
         PRIMARY KEY(room_id,hand_id)
       );
+      CREATE TABLE IF NOT EXISTS hand_replays (
+        hand_id TEXT PRIMARY KEY, sequence INTEGER UNIQUE,
+        room_id TEXT NOT NULL REFERENCES rooms(id), room_name TEXT NOT NULL,
+        config_json TEXT, started_at INTEGER, finished_at INTEGER,
+        availability TEXT NOT NULL CHECK(availability IN ('full','summary_only')),
+        participants_json TEXT NOT NULL, settlement_json TEXT, step_count INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS hand_replay_players (
+        hand_id TEXT NOT NULL REFERENCES hand_replays(hand_id), account_id TEXT NOT NULL REFERENCES accounts(id),
+        seat INTEGER NOT NULL, own_cards_json TEXT, PRIMARY KEY(hand_id,account_id)
+      );
+      CREATE INDEX IF NOT EXISTS replay_players_account ON hand_replay_players(account_id,hand_id);
+      CREATE TABLE IF NOT EXISTS hand_replay_frames (
+        hand_id TEXT NOT NULL REFERENCES hand_replays(hand_id), step_index INTEGER NOT NULL,
+        frame_json TEXT NOT NULL, PRIMARY KEY(hand_id,step_index)
+      );
       CREATE TABLE IF NOT EXISTS requests (
         account_id TEXT NOT NULL, operation TEXT NOT NULL, resource_id TEXT NOT NULL,
         request_id TEXT NOT NULL, body_hash TEXT NOT NULL, result_json TEXT NOT NULL,

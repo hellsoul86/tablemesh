@@ -50,5 +50,17 @@ export function createGameMcpServer(api: GameApi, options: { rewardsUrl?: string
   register('tablemesh_act', '提交一个当前合法动作。raise.amount 是本轮累计投入。版本冲突后重新观察和决定动作。', { roomId: id, ...meta, windowId: id, action }, true, (args, signal) => api(roomPath(args) + '/actions', 'POST', roomBody(args), signal));
 
   register('tablemesh_wait_for_turn', '等待本人行动、牌局完成或状态变化，返回最新本人视图。最多等待25秒；取消等待不离席，不提交游戏动作。state_changed或timeout后按新版本继续等待。', { roomId: id, afterStateVersion: version, maxWaitMs: z.number().int().min(0).max(25_000).optional() }, false, (args, signal) => api(roomPath(args) + '/wait?afterStateVersion=' + String(args.afterStateVersion) + '&maxWaitMs=' + String(args.maxWaitMs ?? 20_000), 'GET', undefined, signal));
+  register('tablemesh_list_replays', '列出本账号参与过的已结束牌局，最新结算在前。旧局可能仅保留结算，不能推算未知筹码净变化。', { before: z.number().int().positive().optional(), limit: z.number().int().min(1).max(50).optional() }, false, (args, signal) => {
+    const query = new URLSearchParams();
+    if (args.before !== undefined) query.set('before', String(args.before));
+    if (args.limit !== undefined) query.set('limit', String(args.limit));
+    return api('/replays' + (query.size ? '?' + query.toString() : ''), 'GET', undefined, signal);
+  });
+  register('tablemesh_get_replay', '读取本账号参与过的已结束牌局。只含本人私牌和各步当时公开的摊牌；一页最多200步，按nextAfterStep继续。全下自动发完并结算可发生在同一步。历史不提供下注窗口。', { handId: id, afterStep: z.number().int().min(-1).optional(), limit: z.number().int().min(1).max(200).optional() }, false, (args, signal) => {
+    const query = new URLSearchParams();
+    if (args.afterStep !== undefined) query.set('afterStep', String(args.afterStep));
+    if (args.limit !== undefined) query.set('limit', String(args.limit));
+    return api('/replays/' + encodeURIComponent(String(args.handId)) + (query.size ? '?' + query.toString() : ''), 'GET', undefined, signal);
+  });
   return server;
 }

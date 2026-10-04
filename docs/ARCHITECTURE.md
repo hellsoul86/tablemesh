@@ -14,7 +14,7 @@ The repository uses npm workspaces, ESM, strict TypeScript and Node >=22.13. Dep
 |---|---|---|
 | packages/core | Serializable Hold'em reducer/evaluator and browser-safe DTOs | None |
 | packages/server | Sessions, HTTP, room scheduler, SQLite, points, inventory, redemption and HTTP/stdio MCP adapters | core, Node builtins, MCP SDK, zod |
-| packages/web | Login, lobby, account/points, table and reconnect | Browser API client; Vite build |
+| packages/web | Login, lobby, account/points, table, reconnect and ended-hand replay | Browser API client; Vite build |
 | packages/rewards-web | Catalog, redemption, owner code reveal and protected inventory UI | Browser API client; Vite build |
 | plugins/tablemesh | Manifests, launcher and gameplay skill | Built server adapter |
 
@@ -34,6 +34,7 @@ The current schema contains:
 - `wallets` and `ledger`: nonnegative available/held balances and unique ledger source keys. Wallet changes and entries share a transaction. The starter grant uses `starter:<account>:v0`; v0 has no game point grants.
 - `products`, `inventory` and `redemptions`: price and sandbox flag, encrypted codes with unique keyed fingerprints, one code assignment per redemption, and unique account/request IDs. `admin_audit` records operations without code plaintext.
 - `fair_play` and `room_abandons`: reputation, cooldown and one abandonment record per account/room/hand.
+- `hand_replays`, `hand_replay_players`, `hand_replay_frames`: completed-hand metadata, original account-bound dealt cards and public post-reduction frames. Completion allocates the immutable listing sequence.
 - `hand_settlements`: one result and original account/seat/name snapshot per room/hand. Its public `hand_settled` event and published marker commit with room state.
 
 Room commands run in a per-room queue. Accepted duplicates replay first. For a new command, the server captures time and commits any due timeout separately, then checks the command's version, seat and window in its own transaction. A valid reducer result, room snapshot, public events and request metadata commit together; responses follow commit. Persisted deadlines restore on restart. At the deadline, timeout wins and a command carrying the previous version conflicts. Confirmed abandonment before the deadline uses the captured time to fold in the current or next legal window; all-in rights remain until settlement. Disconnects do not incur a penalty.
@@ -41,6 +42,14 @@ Room commands run in a per-room queue. Accepted duplicates replay first. For a n
 The service saves each new transition settlement before abandoned participants are removed. Seat changes clear stale current-hand display fields, while the persisted event retains the original account identities and awards. GET snapshots project the requesting viewer's cards and legal actions; the full engine JSON stays inside the service.
 
 Redemption checks retry history, product mode, balance and available inventory in one transaction. It assigns one code, records a points reserve and capture, and marks the order fulfilled. Failure rolls back the transaction. A retry returns the same order; two accounts competing for the last code yield one fulfillment and one OUT_OF_STOCK, without debiting the loser. Future external fulfillment will need pending holds, an outbox, idempotent delivery and release on definitive failure before supplier calls are added.
+
+## Ended-hand replay
+
+`replay.ts` captures new hands inside the existing command transaction. Original dealt-in accounts, names, pre-blind stacks, room label and config are frozen at start. Each successful core reduction records its real public state; timeout and abandonment folds have distinct sources. Confirmed abandonment also records a marker before automatic fold. Completion records the original final stacks and settlement before abandoned seats are removed. A request retry adds no frame, and a rejected action contributes none. An independently committed due timeout can still add its genuine frame before the stale action is rejected.
+
+A replay step is one atomic reducer result. If an all-in action runs multiple streets and settles, its final public snapshot and ordered public street transitions stay together; the UI labels automatic runout rather than inventing intermediate states. Private dealt cards live in separate account-bound rows. A response includes only the caller's cards; each frame retains its own original public revealedHands. Historical action windows are cleared. Replay reads neither move the live room nor affect points or reputation.
+
+Only ended hands are listed or read, and authorization uses the original account rather than current occupancy. Frame and list pagination are bounded. Additive startup tables/backfill preserve existing settlements as summary_only: old public events omit enough action and table data that a full trajectory, original private cards and chip net cannot be recovered. Such results have no frames, private cards or claimed net change. A pre-feature active hand also becomes summary-only upon finishing; a newly captured active hand continues its trace across restart. Completed sequence is allocated at settlement, so a long hand that finishes later sorts ahead of a later-started short hand.
 
 ## User Agent connection
 
@@ -68,7 +77,7 @@ Only Hold'em is implemented. `RuleSet` reserves separate public/private views, o
 
 Use `npm ci`, `npm run check`, `npm run plugin:check` and `npm run test:e2e`. Scoped rule/service tests are `npm run test --workspace @tablemesh/core` and `npm run test --workspace @tablemesh/server`. `npm run dev` starts the three local services; `node packages/server/dist/mcp.js` starts the built stdio adapter.
 
-Checks cover two-account HTTP play, SDK tools, unauthorized actions/private reads, stale and duplicate requests, deadlines/restart, Hold'em payouts, starter ledger uniqueness, last-stock redemption and owner-only code access. Browser checks cover the two web apps and session restoration. SDK/launcher checks do not establish Codex-host installation or public directory approval. A separate Codex CLI 0.158.0 app-server check used an ephemeral thread and runtime MCP configuration to list all eleven tools and call account/observation/wait/action through the actual HTTP host. It made no model turn and does not establish autonomous strategy, plugin installation or continuous background execution.
+Checks cover two-account HTTP play, SDK tools, unauthorized actions/private reads, stale and duplicate requests, deadlines/restart, Hold'em payouts, starter ledger uniqueness, last-stock redemption and owner-only code access. Browser checks cover the two web apps and session restoration. SDK/launcher checks do not establish Codex-host installation or public directory approval. A separate Codex CLI 0.158.0 app-server check used an ephemeral thread and runtime MCP configuration to list all thirteen tools and call account/observation/wait/action plus original-account replay list/detail through the actual HTTP host. It made no model turn and does not establish autonomous strategy, plugin installation or continuous background execution.
 
 Follow-up work includes public HTTPS deployment and MCP OAuth authorization, real reward economics, deployment/recovery, supplier fulfillment, Tractor/Mahjong, multi-instance room ownership and streaming notifications.
 
