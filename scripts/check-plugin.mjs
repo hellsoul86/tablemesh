@@ -36,7 +36,7 @@ try {
   client = new Client({ name: 'tablemesh-plugin-check', version: '0.1.0' });
   await client.connect(transport);
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 11);
+  assert.equal(tools.tools.length, 13);
   assert.equal(tools.tools.some(tool => /reward|secret|admin|inventory/i.test(tool.name)), false);
   for (const tool of tools.tools) assert.equal(tool.annotations?.idempotentHint, true);
   const call = async (name, arguments_ = {}) => {
@@ -77,6 +77,13 @@ try {
   }
   assert.equal(snapshot.game.phase, 'complete');
   assert.ok(toolMoves >= 2);
+  const replays = await call('tablemesh_list_replays');
+  assert.equal(replays.data.hands[0].handId, snapshot.game.handId);
+  const replay = await call('tablemesh_get_replay', { handId: snapshot.game.handId });
+  assert.equal(replay.data.summary.availability, 'full');
+  assert.deepEqual(replay.data.you.privateState.holeCards, snapshot.you.privateState.holeCards);
+  assert.equal(replay.data.frames.at(-1).game.phase, 'complete');
+  assert.equal(replay.data.frames[0].game.revealedHands.length, 0);
   const nextHand = await call('tablemesh_start_hand', { roomId: room.id, stateVersion: snapshot.stateVersion, requestId: randomUUID() });
   assert.equal(nextHand.ok, true);
   const leaveMeta = { roomId: room.id, stateVersion: nextHand.data.snapshot.stateVersion, requestId: randomUUID() };
@@ -90,7 +97,7 @@ try {
   assert.equal(points.data.account.points, 1000);
   assert.equal(JSON.stringify(points).includes('code_ciphertext'), false);
   assert.equal(stderr.includes(minted.body.data.token), false);
-  console.log(`Tokem plugin check: PASS (launcher spawned, 11 tools, ${toolMoves} game actions, explicit abandonment guard; host installation unverified).`);
+  console.log(`Tokem plugin check: PASS (launcher spawned, 13 tools, ${toolMoves} game actions, explicit abandonment guard; host installation unverified).`);
 } finally {
   await client?.close();
   await f.close();

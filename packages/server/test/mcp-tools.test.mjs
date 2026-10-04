@@ -20,7 +20,7 @@ test('shared registry advertises both-transport workflow and rejects forged auth
   const f = await connect(async (...args) => { calls.push(args); return { ok: true, data: {} }; });
   try {
     const { tools } = await f.client.listTools();
-    assert.equal(tools.length, 11);
+    assert.equal(tools.length, 13);
     assert.match(f.client.getInstructions(), /sharing its seat/);
     assert.match(f.client.getInstructions(), /cancelling a wait does not leave/);
     assert.equal(tools.find(t => t.name === 'tablemesh_wait_for_turn').annotations.readOnlyHint, true);
@@ -91,4 +91,17 @@ test('actions preserve retry payload and legal view; invoker failures cannot dis
     assert.equal(failure.structuredContent.error.code, 'INTERNAL');
     assert.equal(JSON.stringify(failure).includes('private-token-do-not-return'), false);
   } finally { await f.close(); }
+});
+
+test('history tools are readonly, bounded, identity-free and preserve paginated API projection', async()=>{
+ const calls=[];const data={summary:{availability:'summary_only',netChips:null},frames:[]};
+ const f=await connect(async(...args)=>{calls.push(args);return {ok:true,data};});try {
+  const tools=(await f.client.listTools()).tools;
+  for(const name of ['tablemesh_list_replays','tablemesh_get_replay']) assert.equal(tools.find(t=>t.name===name).annotations.readOnlyHint,true);
+  assert.equal((await invoke(f.client,'tablemesh_list_replays',{accountId:'victim'})).isError,true);
+  assert.equal((await invoke(f.client,'tablemesh_get_replay',{handId:'h',limit:201})).isError,true);assert.equal(calls.length,0);
+  await invoke(f.client,'tablemesh_list_replays',{before:5,limit:1});assert.equal(calls.at(-1)[0],'/replays?before=5&limit=1');
+  const result=await invoke(f.client,'tablemesh_get_replay',{handId:'h/other?x=1',afterStep:-1,limit:2});
+  assert.deepEqual(result.structuredContent,{ok:true,data});assert.equal(calls.at(-1)[0],'/replays/h%2Fother%3Fx%3D1?afterStep=-1&limit=2');assert.equal(calls.at(-1)[1],'GET');
+ }finally{await f.close();}
 });
