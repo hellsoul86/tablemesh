@@ -122,11 +122,21 @@ function potsFromContributions(state: HoldemEngineState): { amount:number; contr
  const players=state.publicState.seats;
  const levels=[...new Set(players.map(p=>p.totalBet).filter(b=>b>0))].sort((a,b)=>a-b);
  let lower=0;
- return levels.map(level=>{
+ const pots:ReturnType<typeof potsFromContributions>=[];
+ for(const level of levels) {
   const contributors=players.filter(p=>p.totalBet>=level);
   const amount=(level-lower)*contributors.length;lower=level;
-  return { amount, contributors,eligible:contributors.filter(p=>p.status==='active'||p.status==='all-in') };
- });
+  const eligible=contributors.filter(p=>p.status==='active'||p.status==='all-in');
+  const previous=pots.at(-1);
+  // Folded contributions can create several layers of the same contested pot.
+  // Combine those before awarding odd chips, but keep unmatched refunds separate.
+  if(contributors.length>1 && previous && previous.contributors.length>1
+   && previous.eligible.length===eligible.length
+   && previous.eligible.every((player,index)=>player.seat===eligible[index]!.seat)) {
+   previous.amount+=amount;
+  } else pots.push({amount,contributors,eligible});
+ }
+ return pots;
 }
 function refreshPots(state: HoldemEngineState): void {
  state.publicState.pots=potsFromContributions(state).map(p=>({amount:p.amount,eligibleSeats:p.eligible.map(s=>s.seat)}));

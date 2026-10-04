@@ -124,6 +124,44 @@ test('folded contributions stay in pots, odd chip follows button clockwise among
  assert.deepEqual(state.publicState.revealedHands.map(p=>p.seat),[0,2]);
  assert.equal(total(state),300);
 });
+test('unequal folded contributions merge before splitting a tied pot',()=>{
+ const customDeck=deck(['2c','2d','2h','2s','4c','3c','3d','3h','3s','4d','4h','Ts','Js','Qs','4s','Ks','5c','As']);
+ let state=begin(5,undefined,customDeck);
+ const act=(seat,action)=>{
+  assert.equal(state.publicState.actorSeat,seat);
+  state=step(state,action);
+  assert.ok(state.publicState.seats.every(p=>p.status!=='all-in'));
+ };
+ act(3,{type:'raise',amount:25});act(4,{type:'raise',amount:40});act(0,{type:'call'});
+ act(1,{type:'fold'});act(2,{type:'fold'});act(3,{type:'fold'});
+ assert.deepEqual(state.publicState.seats.map(p=>p.totalBet),[40,5,10,25,40]);
+ assert.deepEqual(state.publicState.pots,[{amount:120,eligibleSeats:[0,4]}]);
+ for(const street of ['flop','turn','river']) {
+  assert.equal(state.publicState.phase,street);act(4,{type:'check'});act(0,{type:'check'});
+ }
+ assert.equal(state.publicState.phase,'complete');
+ assert.deepEqual(state.publicState.board,['Ts','Js','Qs','Ks','As']);
+ assert.deepEqual(state.publicState.settlement.pots,[{amount:120,winners:[4,0],awards:[{seat:4,amount:60},{seat:0,amount:60}]}]);
+ assert.deepEqual(state.publicState.settlement.refunds,[]);
+ assert.deepEqual(state.publicState.seats.map(p=>p.stack),[1020,995,990,975,1020]);
+ assert.deepEqual(state.publicState.revealedHands.map(p=>p.seat),[0,4]);
+ assert.equal(total(state),5000);
+});
+test('different all-in eligibility keeps tied winners and odd chips separate in each real pot',()=>{
+ const customDeck=deck(['4c','Kc','Qc','Ah','Ac','4d','Kd','Qd','As','Ad','2h','2c','3d','7h','2d','8s','3h','9c']);
+ let state=begin(5,[10,1000,5,10,10],customDeck);
+ for(const seat of [3,4,0]) {assert.equal(state.publicState.actorSeat,seat);state=step(state,{type:'call'});}
+ assert.equal(state.publicState.actorSeat,1);state=step(state,{type:'fold'});
+ assert.equal(state.publicState.phase,'complete');
+ assert.deepEqual(state.publicState.settlement.pots,[
+  {amount:25,winners:[4,0],awards:[{seat:4,amount:13},{seat:0,amount:12}]},
+  {amount:15,winners:[4,0],awards:[{seat:4,amount:8},{seat:0,amount:7}]}
+ ]);
+ assert.deepEqual(state.publicState.settlement.refunds,[]);
+ assert.deepEqual(state.publicState.seats.map(p=>p.stack),[19,995,0,0,21]);
+ assert.deepEqual(state.publicState.revealedHands.map(p=>p.seat),[0,2,3,4]);
+ assert.equal(total(state),1035);
+});
 test('heads-up single fold pays contested blinds and refunds unmatched blind without revealing',()=>{
  let state=begin();state=step(state,{type:'fold'});
  assert.equal(state.publicState.phase,'complete');assert.deepEqual(state.publicState.revealedHands,[]);
