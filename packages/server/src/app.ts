@@ -6,6 +6,7 @@ import type { AccountView, HoldemConfig, HoldemEngineState, EngineResult, RoomSn
 import { Store } from './db.js';
 import { ReplayHistory, type ReplayCapture } from './replay.js';
 import { RoundActionHistory } from './round-actions.js';
+import { tableStep, settlementParticipants, projectTableEvents, type PublicTableStep } from './table-events.js';
 import { readConfig, mcpPublicUrl, type AppConfig } from './config.js';
 import { handleGameMcp, McpWaitCancellation } from './mcp-http.js';
 import type { GameApi } from './mcp-tools.js';
@@ -292,7 +293,7 @@ export class Application {
   private recordRequest(accountId: string, operation: string, resourceId: string, requestId: string, bodyHash: string, result: unknown): void {
     this.store.run('INSERT INTO requests VALUES(?,?,?,?,?,?)', accountId, operation, resourceId, requestId, bodyHash, JSON.stringify(result));
   }
-  private reduce(result: EngineResult, roomId: string, capture?: ReplayCapture): HoldemEngineState {
+  private reduce(result: EngineResult, roomId: string, capture?: ReplayCapture, steps?: PublicTableStep[]): HoldemEngineState {
     const state = unwrap(result);
     // Only this transition's settlement is accepted; an old public summary is
     // never interpreted as a new payout or result. This runs in the command tx.
@@ -304,6 +305,7 @@ export class Application {
     if (result.ok && capture) {
       if (capture.before) Object.assign(capture,this.roundActions.record(roomId,capture.before,result.transition,capture.kind,capture.at));
       this.replays.capture(roomId, result.transition, capture);
+      steps?.push(tableStep(result.transition,capture));
     }
     return state;
   }
@@ -315,7 +317,7 @@ export class Application {
     if (Number(changed.changes) !== 1) fail('VERSION_CONFLICT', 'Room changed; observe again', 409, this.room(row.id).state_version);
     this.store.run('INSERT INTO room_events VALUES(?,?,?,?,?)', row.id, row.event_cursor + 1, version, eventType, JSON.stringify(payload));
     records.forEach((record, index) => {
-      const summary = { handId: record.hand_id, participants: JSON.parse(record.participants_json), settlement: JSON.parse(record.result_json) };
+      const summary = { handId: record.hand_id, participants: settlementParticipants(this.store,record.hand_id,JSON.parse(record.participants_json)), settlement: JSON.parse(record.result_json) };
       this.store.run('INSERT INTO room_events VALUES(?,?,?,?,?)', row.id, row.event_cursor + 2 + index, version, 'hand_settled', JSON.stringify(summary));
       this.store.run('UPDATE hand_settlements SET published=1 WHERE room_id=? AND hand_id=?', row.id, record.hand_id);
     });
@@ -339,7 +341,7 @@ export class Application {
     this.store.run('INSERT INTO admin_audit VALUES(?,?,?,?)', randomUUID(), 'confirmed_abandonment', `${accountId}:${roomId}:${handId}:${reputationDelta}:${cooldownUntil}`, now);
     return true;
   }
-  private settleAbandons(state: HoldemEngineState, roomId: string, now: number): HoldemEngineState {
+  private settleAbandons(state: HoldemEngineState, roomId: string, now: number, steps?: PublicTableStep[]): HoldemEngineState {
     let current = state;
     // Consume only current legal actor windows; folded/all-in seats need no action.
     for (let n = 0; n < current.config.maxSeats; n++) {
@@ -348,7 +350,7 @@ export class Application {
       if (!window || game.phase === 'complete' || now >= window.deadline) break;
       const actor = game.seats.find(seat => seat.seat === game.actorSeat);
       if (!actor || actor.status !== 'active' || !this.abandoned(current, roomId).includes(actor.accountId)) break;
-      current = this.reduce(applyAction(current, { seat: actor.seat, action: { type: 'fold' }, windowId: window.id, now }), roomId, {kind:'abandon_fold',at:now,before:current});
+      current = this.reduce(applyAction(current, { seat: actor.seat, action: { type: 'fold' }, windowId: window.id, now }), roomId, {kind:'abandon_fold',at:now,before:current},steps);
     }
     const game = getPublicState(current);
     if (game.phase === 'complete' && game.handId) {
@@ -376,6 +378,8 @@ export class Application {
       let state = this.engine(row);
       const current = getPublicState(state);
       const own = current.seats.find(seat => seat.accountId === identity.accountId);
+      const steps:PublicTableStep[]=[];
+      let membership:Json|null=null;
       if (operation === 'join' || operation === 'leave') {
         exactKeys(body, operation === 'join' ? ['seat', 'stateVersion', 'requestId'] : ['stateVersion', 'requestId', 'confirmAbandon']);
         const live = current.phase !== 'waiting' && current.phase !== 'complete';
@@ -384,13 +388,14 @@ export class Application {
           if (!own) fail('FORBIDDEN', 'This account does not own a seat', 403);
           if (body.confirmAbandon !== true) fail('ILLEGAL_ACTION', 'Confirm abandonment explicitly: reputation and new-game cooldown penalties apply', 409);
           if (!current.handId) fail('ILLEGAL_ACTION', 'No active hand');
+          membership={participant:{seat:own.seat,accountId:own.accountId,displayName:own.displayName},abandoned:true};
           const recorded = this.recordAbandon(id, current.handId, identity.accountId, own.seat, now);
           if (!recorded) {
             this.recordRequest(identity.accountId, operation, id, request.requestId, request.bodyHash, { roomId: id, acceptedStateVersion: row.state_version });
             return { snapshot: this.snapshot(row, identity), replayed: false };
           }
           this.replays.abandon(id,state,own.seat,now,this.roundActions.view(id,current));
-          state = this.settleAbandons(state, id, now);
+          state = this.settleAbandons(state, id, now,steps);
         } else {
         const seats = current.seats.map(({ seat, accountId, displayName }) => ({ seat, accountId, displayName }));
         if (operation === 'join') {
@@ -398,10 +403,12 @@ export class Application {
           if (own) fail('ILLEGAL_ACTION', 'This account already has a seat', 409);
           const seat = body.seat === undefined ? Array.from({ length: state.config.maxSeats }, (_, n) => n).find(n => !seats.some(seat => seat.seat === n)) : integer(body.seat, 'seat', 0, state.config.maxSeats - 1);
           if (seat === undefined || seats.some(item => item.seat === seat)) fail('ROOM_FULL', 'No requested seat is available', 409);
-          seats.push({ seat, accountId: identity.accountId, displayName: this.account(identity.accountId).displayName });
+          const participant={ seat, accountId: identity.accountId, displayName: this.account(identity.accountId).displayName };
+          seats.push(participant);membership={participant};
           state = this.reduce(setSeats(state, seats), id);
         } else {
           if (!own) fail('FORBIDDEN', 'This account does not own a seat', 403);
+          membership={participant:{seat:own.seat,accountId:own.accountId,displayName:own.displayName},abandoned:false};
           state = this.reduce(setSeats(state, seats.filter(seat => seat.accountId !== identity.accountId)), id);
         }
         }
@@ -410,7 +417,7 @@ export class Application {
         if (row.owner_account_id !== identity.accountId) fail('FORBIDDEN', 'Only the owner can start a hand', 403);
         this.enteringAllowed(identity.accountId);
         for (const seat of current.seats) this.enteringAllowed(seat.accountId);
-        state = this.reduce(startHand(state, { handId: randomUUID(), deck: shuffleDeck(), now }), id, {kind:'start',at:now,before:state});
+        state = this.reduce(startHand(state, { handId: randomUUID(), deck: shuffleDeck(), now }), id, {kind:'start',at:now,before:state},steps);
       } else {
         exactKeys(body, ['stateVersion', 'requestId', 'windowId', 'action']);
         if (!own) fail('FORBIDDEN', 'A seat belonging to this account is required', 403);
@@ -421,10 +428,16 @@ export class Application {
         exactKeys(action, action.type === 'raise' ? ['type', 'amount'] : ['type']);
         if (!['fold', 'check', 'call', 'raise'].includes(String(action.type))) fail('INVALID_INPUT', 'Invalid action type');
         const validated = action.type === 'raise' ? { type: 'raise' as const, amount: integer(action.amount, 'amount') } : { type: action.type as 'fold' | 'check' | 'call' };
-        state = this.reduce(applyAction(state, { seat: own.seat, action: validated, windowId, now }), id, {kind:'action',at:now,before:state});
+        state = this.reduce(applyAction(state, { seat: own.seat, action: validated, windowId, now }), id, {kind:'action',at:now,before:state},steps);
       }
-      state = this.settleAbandons(state, id, now);
-      const updated = this.persistRoom(row, state, `room_${operation}`, { phase: getPublicState(state).phase, actorSeat: own?.seat ?? null });
+      state = this.settleAbandons(state, id, now,steps);
+      const payload:Json={phase:getPublicState(state).phase,actorSeat:own?.seat??null,steps:steps as unknown as Json,...(membership as object??{})};
+      if(operation==='start') {
+        const handId=getPublicState(state).handId!;
+        const replay=this.store.one<{participants_json:string}>('SELECT participants_json FROM hand_replays WHERE hand_id=?',handId);
+        Object.assign(payload,{handId,participants:replay?JSON.parse(replay.participants_json).map((p:{seat:number;accountId:string;displayName:string;startingStack:number|null})=>({seat:p.seat,accountId:p.accountId,displayName:p.displayName,startingStack:p.startingStack,finalStack:null})):[]});
+      }
+      const updated = this.persistRoom(row, state, `room_${operation}`,payload);
       this.recordRequest(identity.accountId, operation, id, request.requestId, request.bodyHash, { roomId: id, acceptedStateVersion: updated.state_version });
       return { snapshot: this.snapshot(updated, identity), replayed: false };
       });
@@ -438,8 +451,9 @@ export class Application {
       if (!active || active.deadline > now) return false;
       const requestId = `timeout:${roomId}:${active.id}`;
       if (this.store.one('SELECT request_id FROM requests WHERE account_id=? AND operation=? AND resource_id=? AND request_id=?', 'server', 'timeout', roomId, requestId)) return false;
-      const state = this.settleAbandons(this.reduce(applyTimeout(current, now), roomId, {kind:'timeout',at:now,before:current}), roomId, now);
-      const updated = this.persistRoom(latest, state, 'room_timeout', { windowId: active.id, phase: getPublicState(state).phase });
+      const steps:PublicTableStep[]=[];
+      const state = this.settleAbandons(this.reduce(applyTimeout(current, now), roomId, {kind:'timeout',at:now,before:current},steps), roomId, now,steps);
+      const updated = this.persistRoom(latest, state, 'room_timeout', { windowId: active.id, phase: getPublicState(state).phase, steps:steps as unknown as Json });
       this.recordRequest('server', 'timeout', roomId, requestId, hash(active.id), { acceptedStateVersion: updated.state_version });
       return true;
     });
@@ -618,7 +632,7 @@ export class Application {
             const after = raw === null ? 0 : integer(Number(raw), 'after');
             const reset = after > row.event_cursor;
             const events = this.store.all<{ cursor: number; state_version: number; type: string; public_payload_json: string }>('SELECT * FROM room_events WHERE room_id=? AND cursor>? ORDER BY cursor LIMIT 200', id, reset ? 0 : after).map(event => ({ cursor: event.cursor, stateVersion: event.state_version, type: event.type, payload: JSON.parse(event.public_payload_json) as Json }));
-            data = { events, snapshot: this.snapshot(row, identity), reset };
+            data = { events:projectTableEvents(this.store,id,events), snapshot: this.snapshot(row, identity), reset };
           } else if (method === 'POST' && operation && !['events', 'wait'].includes(operation)) data = await this.roomMutation(identity, id, operation === 'actions' ? 'action' : operation, body);
           else fail('NOT_FOUND', 'Endpoint not found', 404);
         } else if (method === 'GET' && path === '/api/rewards/products') data = this.store.all<ProductRow>('SELECT * FROM products WHERE enabled=1').filter(product => product.sandbox || this.config.realRewardsEnabled).map((row): RewardProduct => ({ id: row.id, name: row.name, pointsCost: row.points_cost, sandbox: Boolean(row.sandbox), available: this.store.one<{ n: number }>('SELECT COUNT(*) n FROM inventory WHERE product_id=? AND status=?', row.id, 'available')!.n }));
